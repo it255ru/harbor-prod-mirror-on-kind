@@ -54,6 +54,14 @@ kubectl get nodes -o custom-columns=NAME:.metadata.name,ROLE:'.metadata.labels.h
 kubectl get nodes -o custom-columns=NAME:.metadata.name,TAINT:'.spec.taints[*].key' --no-headers | grep -c 'harbor-ha/role'   # Ожидается: 13
 ```
 
+**V1.4 CoreDNS на двух `lb`-нодах, не на control-plane**
+
+```bash
+kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide --no-headers | awk '{print $1,$3,$7}'
+```
+
+Ожидается: 2 пода `Running` на разных `lb`-нодах. Иначе при потере control-plane перестают резолвиться имена и вся схема недоступна (см. P4.11). Патч ставит `make cluster` (`hack/config/coredns-ha.yaml`); на уже созданном кластере — `kubectl -n kube-system patch deployment coredns --patch-file hack/config/coredns-ha.yaml`.
+
 ## 2. Поды и размещение
 
 **V2.1 Нет подов не в `Running`/`Completed`**
@@ -690,6 +698,7 @@ hack/tests/h50-stateful-node-replace.sh pg        # нода лидера Patron
 hack/tests/h50-stateful-node-replace.sh redis     # нода master Valkey
 hack/tests/h50-stateful-node-replace.sh consul    # нода лидера raft
 hack/tests/h50-stateful-node-replace.sh s3        # нода Garage: ПОТЕРЯ ВСЕХ БЛОБОВ, образы придётся запушить заново
+hack/tests/h50-stateful-node-replace.sh lb        # lb-нода с VIP: образ Keepalived скрипт грузит в новую ноду сам (kind load)
 # необязательно: HEAL_WAIT=240 (сколько секунд ждать самовосстановления роли до применения лечения)
 ```
 
@@ -708,7 +717,22 @@ hack/tests/h50-stateful-node-replace.sh s3        # нода Garage: ПОТЕР�
 
 **Восстановление Harbor после потери блобов (s3).** Запись об артефактах остаётся в БД Harbor, а registry держит кэш описателей блобов в Redis (база 2): при повторной загрузке он считает слои уже существующими и не загружает их, `pull` даёт `manifest unknown`, поды demo — `ErrImagePull`. Лечение: (1) удалить устаревшие репозитории через API (`curl -sk -u admin:Harbor12345 -X DELETE https://core.harbor.domain/api/v2.0/projects/python/repositories/hello`), (2) сбросить кэш registry: `kubectl -n harbor-deps exec redis-0 -c valkey -- sh -c 'valkey-cli -h harbor-lb.harbor-deps -n 2 flushdb'`, (3) заново запушить образы (`make deploy-app`). После всех замен `make verify` — без `FAIL`. Если скрипт прерван: `kubectl get nodes`, `kubectl -n harbor-deps get pods`, затем лечение по таблице.
 
-Не проверяется: замена `lb`-ноды (локально собранный образ Keepalived нужно загрузить `kind load`, как образ Patroni) и потеря control-plane.
+Для `lb` (нода с VIP, без томов): VIP переходит на вторую ноду (`https` через него остаётся 200), замена здорова сама через ≈ 136 с от потери; локально собранный образ Keepalived, как и образ Patroni на `pg`-ноду, нужно загрузить `kind load docker-image` (скрипт делает это).
+
+### P4.11 Потеря control-plane
+
+Разрушающая проверка: контейнер control-plane убивается на `HOLD` секунд под нагрузкой и запускается обратно. У kind он один, etcd лежит внутри него. Не разрушает control-plane навсегда (безвозвратная потеря лечится только пересборкой кластера: снапшотов etcd нет).
+
+```bash
+hack/tests/h51-control-plane-loss.sh              # 300 с без control-plane; около 10 минут
+# необязательно: HOLD=300 WORKDIR=<каталог логов>
+```
+
+Что делает: нагрузка как в P4.4 (манифест, блоб, `docker pull`, `docker push`), каждые ≈ 30 с фиксирует, отвечает ли `kubectl`, `https` через VIP и demo-приложение (оно на control-plane), затем `docker start`, ждёт API, ноды `Ready`, Deployment'ы `2/2`, печатает разбор и рестарты.
+
+Ожидается (приёмка 2026-09-26, после D19): `kubectl` не отвечает всё время потери; `https` через VIP всё время `200`; манифесты 0 из 1534, блобы 0 из 564, `docker pull` 0 из 827, самый медленный запрос 0,6 с; demo-приложение недоступно (оно на control-plane); после `docker start` API отвечает через ≈ 10 с, ноды `Ready`, Deployment'ы `2/2`; перезапускаются только поды control-plane и demo. Пока control-plane мёртв, менять ничего нельзя: планирование, пересоздание подов и обновление Endpoints стоят.
+
+Если данные тоже пропали на время потери (`https` `000`, `rc=35` за миллисекунды) — CoreDNS не на воркерах (V1.4): без DNS у HAProxy нет бэкендов (`MAINT (resolution)`), у core нет БД, `core`/`jobservice` уходят в `CrashLoopBackOff`. До D19 это и происходило: 2495 из 2660 манифестов не прошли, после `docker start` Harbor возвращался ещё ≈ 2 минуты, а поды ≈ 7.
 
 ### P6.2 `synchronous_mode` Patroni (справочная проверка, H6.2)
 
@@ -751,13 +775,14 @@ hack/tests/h50-stateful-node-replace.sh s3        # нода Garage: ПОТЕР�
 | `harbor-trivy-N` в `CrashLoopBackOff` или `Pending` после замены ноды | том `local-path` привязан к погибшей ноде (на новой каталог пуст или PV не подходит): `kubectl delete pvc data-harbor-trivy-N; kubectl delete pod harbor-trivy-N` — Trivy заново скачает базу (≈ 1,3 ГБ); поднимется на любой `app`-ноде |
 | `pg-N` / `redis-N` в `CrashLoopBackOff` после замены ноды: `Permission denied` на каталоге данных | каталог тома `local-path` на новой ноде создан от root: `kubectl -n harbor-deps delete pvc data-<под>; kubectl -n harbor-deps delete pod <под>` (участник заново присоединится к выжившим); см. P4.10 |
 | После потери `s3`-ноды образы не пушатся заново: `manifest unknown`, `already exists` без загрузки слоёв | устаревшие артефакты в БД Harbor и кэш блобов registry в Redis (база 2): удалить репозитории через API, `valkey-cli -n 2 flushdb`, запушить снова; см. P4.10 |
+| При потере control-plane Harbor перестал отвечать (`https` `000`), `core`/`jobservice` в `CrashLoopBackOff`, у HAProxy бэкенды `MAINT (resolution)` | CoreDNS стоит на control-plane, а не на `lb`-нодах (V1.4): `kubectl -n kube-system patch deployment coredns --patch-file hack/config/coredns-ha.yaml` (D19) |
 | Сбросить один компонент | удалить его Secret **и** PVC (`data-<имя>-N`), затем `make <таргет>`; удалять только Secret нельзя: новый пароль не совпадёт с данными |
 | Всё сломалось | `make cluster-delete && make cluster && make ha-deps && make infra-lb && make harbor-ha && make deploy-app` (около 10 минут с кэшем образов: `make images-load` до и после `make cluster`) |
 
 ## Что ранбук не проверяет
 
 - Разрушающие сценарии (Patroni failover, Sentinel failover, потеря `app`-ноды или ноды роли): скрипты `hack/tests/` (раздел 13), результаты — `backlog.md`, P5.
-- Замену `lb`-ноды и потерю control-plane, `synchronous_mode` как постоянную настройку в проде.
+- `synchronous_mode` как постоянную настройку, безвозвратную потерю control-plane (восстановление — пересборка кластера).
 - Производительность и нагрузку.
 
 ## Ansible-версия (`make verify`)

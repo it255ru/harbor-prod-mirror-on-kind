@@ -2,7 +2,7 @@
 
 Mirror of one specific production stand on a single machine: a 14-node KinD cluster with Harbor **2.14.3** (chart `1.18.3`) in active-active, **Keepalived + HAProxy** as the Infra LB, external PostgreSQL **15.19** under Patroni + Consul, Redis Sentinel and Garage S3 (stands in for Ceph RGW). Fork of [harbor-active-active-on-kind](https://github.com/it255ru/harbor-active-active-on-kind) (@ `7279079`, full history kept), which itself forks [harbor-on-kind](https://github.com/it255ru/harbor-on-kind); the differences from the parent are decisions D11-D17 in [backlog.md](backlog.md). Published at https://github.com/it255ru/harbor-prod-mirror-on-kind.
 
-**Status (2026-09-25):** the stand builds from scratch (about 10 minutes with the image cache), `make verify` gives 38 PASS / 0 FAIL and the failure tests in `hack/tests/` (h41-h50, h62) were run on this stack; the results are in the table under "Failure behaviour" and in `backlog.md` → P5. Node/address map: [docs/stand-topology.md](docs/stand-topology.md). Check-by-check procedure: [docs/verification-runbook.md](docs/verification-runbook.md).
+**Status (2026-09-26):** the stand builds from scratch (about 10 minutes with the image cache), `make verify` gives 39 PASS / 0 FAIL and the failure tests in `hack/tests/` (h41-h51, h62) were run on this stack; the results are in the table under "Failure behaviour" and in `backlog.md` → P5. Node/address map: [docs/stand-topology.md](docs/stand-topology.md). Check-by-check procedure: [docs/verification-runbook.md](docs/verification-runbook.md).
 
 ## Architecture
 
@@ -11,7 +11,7 @@ Mirror of one specific production stand on a single machine: a 14-node KinD clus
 | Role | Nodes | Runs |
 |------|-------|------|
 | app | 2 | Harbor nginx (the entry point), core, portal, registry, jobservice and Trivy (2 replicas each) |
-| lb | 2 | HAProxy "Harbor LB" (PostgreSQL and Redis entry point); Infra LB: Keepalived (VIP) + HAProxy on every lb node |
+| lb | 2 | HAProxy "Harbor LB" (PostgreSQL and Redis entry point); Infra LB: Keepalived (VIP) + HAProxy on every lb node; CoreDNS x2 (D19) |
 | pg | 2 | PostgreSQL 15 under Patroni |
 | redis | 3 | Valkey with a Sentinel sidecar (1 master, 2 replicas) |
 | consul | 3 | Consul servers, the DCS for Patroni |
@@ -59,7 +59,7 @@ Everything is pinned; changing a pin means updating the manifests, this table, `
 ## Build the stand
 
 ```bash
-make cluster       # 14-node kind cluster "harbor" from hack/config/kind-cluster.yaml, context kind-harbor
+make cluster       # 14-node kind cluster "harbor" from hack/config/kind-cluster.yaml (context kind-harbor), CoreDNS moved to the lb nodes
 make infra-lb      # builds the Keepalived image, DaemonSet infra-lb (Keepalived VIP + HAProxy) on the lb nodes
 make ha-deps       # consul -> postgres -> redis -> harbor-lb -> s3, in this order
 make add-host      # "172.20.0.100 core.harbor.domain" in /etc/hosts (sudo, once)
@@ -136,7 +136,8 @@ The failure tests are scripts in `hack/tests/`. They run real load, kill real no
 | `h46-proxy-cache.sh` | proxy-cache project for Docker Hub, served from the cache with the upstream cut off | 4 min |
 | `h48-node-replace.sh [node]` | permanent loss of an `app` node: kills it for good, deletes the node, builds and joins a replacement, reloads the cached images, resets the PVC of the Trivy replica that lived there | 6 min |
 | `h49-trivy-node-loss.sh [node]` | loses the app node of one of the two Trivy replicas while a scan runs every ~5 s; checks that scans keep succeeding | 6 min |
-| `h50-stateful-node-replace.sh <pg\|redis\|consul\|s3>` | permanent loss and replacement of the node of a role holder with empty volumes; checks the data and the self-healing, applies the documented repair (PVC reset; s3: data loss and Harbor clean-up) | 6-10 min each |
+| `h50-stateful-node-replace.sh <pg\|redis\|consul\|s3\|lb>` | permanent loss and replacement of the node of a role holder with empty volumes; checks the data and the self-healing, applies the documented repair (PVC reset; s3: data loss and Harbor clean-up) | 6-10 min each |
+| `h51-control-plane-loss.sh` | kills the only control-plane for 5 min under load and starts it again; checks the data path keeps working without the Kubernetes API | 10 min |
 | `h62-sync-mode.sh <off\|on\|strict>` | what Patroni `synchronous_mode` changes: deletes the replica pod, then the leader pod under a writer; restores the config | 4 min |
 | `h47-role-failure.sh <lb\|pg\|redis\|consul\|s3>` | kills the node of the role holder under load, checks lost acknowledged writes (`s3`: the objects in the bucket) | 3-5 min each |
 
@@ -157,6 +158,8 @@ Measured on this stack (Harbor 2.14.3, PostgreSQL 15.19, Keepalived + HAProxy), 
 | `app` node lost for good and replaced (`h48`) | manifests 0 of 1353, blobs 1 of 501, 1 of 719 pulls failed (the one in flight at the kill); all Deployments are 2/2 again 231 s after the loss (node deleted 60 s after NotReady, replacement built by hand and joined, images loaded from the cache); the node-local PVC of the Trivy replica that lived there must be reset (the script does it) | intact |
 | `consul` / `redis` / `pg` node lost for good and replaced (`h50`) | data intact (consul 10 of 10 keys, redis 50 of 50, pg 200 of 200 rows). Consul heals by itself in ~2 min; redis and pg do **not**: the volume directory of the new node is owned by root and the database gets `Permission denied` (`CrashLoopBackOff`), the documented repair (delete the PVC and the pod of the member) heals it in 7-24 s | intact |
 | `s3` node lost for good (`h50`) | all blobs are lost (211 of 211 objects, no redundancy). `make s3` re-creates the layout, bucket and key, but Harbor still lists the artifacts and the registry has its blob cache in Redis db 2: delete the stale repositories through the API, `flushdb` on db 2, push the images again (`h50` does it) | **lost** |
+| `lb` node (VIP holder) lost for good and replaced (`h50 lb`) | the VIP moves to the other lb node and `https` through it stays 200; the replacement heals by itself (the locally built Keepalived image has to be `kind load`ed into it, like the Patroni image into a pg node) | intact |
+| control-plane down for 5 min (`h51`) | none: 0 of 1534 manifests, 0 of 564 blobs, 0 of 827 pulls failed, `https` via the VIP always 200. Only the demo app (it runs on the control-plane) is down and `kubectl` does not answer; nothing can be changed or rescheduled meanwhile. The API is back 10 s after the start. CoreDNS runs on the lb nodes (D19): with it on the control-plane the whole stand was down for the outage and ~7 min longer. A control-plane lost for good means rebuilding the cluster (etcd is only in its container) | intact |
 
 `synchronous_mode` of Patroni is off (backlog D8). `h62` measured what it would change (pod deletions): with `on` the leader loss costs a 7.3 s write pause instead of 10.3 s and no acknowledged write is at risk while the sync replica lives, with `strict` losing the replica blocks writes for ~16 s. Enabled temporarily and tested on a real loss of the leader's node (`h47 pg`): 0 lost acknowledged writes, the same ~28 s write window (set by the Patroni TTL), the old leader returns as `Sync Standby`; `make verify` accepts that role.
 

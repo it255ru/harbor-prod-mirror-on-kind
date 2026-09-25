@@ -80,11 +80,11 @@ Ingress-контроллера нет: Harbor отдаётся собствен�
 
 | Нода | Роль | IP (снимок) | Что на ней работает |
 |------|------|-------------|---------------------|
-| `harbor-control-plane` | control-plane (без роли) | 172.20.0.14 | Kubernetes API, etcd, coredns, local-path-provisioner; demo-приложение `hello` (NodePort 30500) |
+| `harbor-control-plane` | control-plane (без роли) | 172.20.0.14 | Kubernetes API, etcd, local-path-provisioner; demo-приложение `hello` (NodePort 30500). CoreDNS здесь **нет** (D19) |
 | `harbor-worker` | `app` | 172.20.0.11 | по одной реплике nginx, core, portal, registry, jobservice, trivy (`harbor-trivy-0`) |
 | `harbor-worker2` | `app` | 172.20.0.5 | по одной реплике nginx, core, portal, registry, jobservice, trivy (`harbor-trivy-1`) |
-| `harbor-worker3` | `lb` | 172.20.0.12 | `infra-lb` (HAProxy + Keepalived), HAProxy (Harbor LB) |
-| `harbor-worker4` | `lb` | 172.20.0.3 | `infra-lb` (HAProxy + Keepalived), HAProxy (Harbor LB) |
+| `harbor-worker3` | `lb` | 172.20.0.12 | `infra-lb` (HAProxy + Keepalived), HAProxy (Harbor LB), CoreDNS |
+| `harbor-worker4` | `lb` | 172.20.0.3 | `infra-lb` (HAProxy + Keepalived), HAProxy (Harbor LB), CoreDNS |
 | `harbor-worker5` | `pg` | 172.20.0.2 | `pg-0` (Patroni + PostgreSQL) |
 | `harbor-worker6` | `pg` | 172.20.0.15 | `pg-1` (Patroni + PostgreSQL) |
 | `harbor-worker7` | `redis` | 172.20.0.8 | `redis-2` (Valkey + Sentinel) |
@@ -125,6 +125,7 @@ Ingress-контроллера нет: Harbor отдаётся собствен�
 |--------|---------------|-----------|------------------|
 | Infra LB | `172.20.0.100`:80/443 (VIP на ноде роли `lb`); это не Service | клиенты | `infra-lb` x2 (`lb`, hostNetwork, DaemonSet) |
 | Harbor nginx (вход) | `harbor.default`:80/443 -> под 8080/8443; поды по отдельности: `harbor-nginx-headless.default`:8080/8443 | Infra LB (по подам), внутрикластерные клиенты | `harbor-nginx` x2 (`app`) |
+| DNS кластера (CoreDNS) | `kube-dns.kube-system` `10.96.0.10`:53 | все поды, HAProxy (`resolvers k8s`) | `coredns` x2 (`lb`, D19: путь данных не зависит от control-plane) |
 | Harbor core | `harbor-core.default`:80 | nginx, jobservice, registry | `harbor-core` x2 (`app`) |
 | Harbor portal | `harbor-portal.default`:80 | nginx | `harbor-portal` x2 (`app`) |
 | Harbor registry | `harbor-registry.default`:5000, 8080 | nginx, core | `harbor-registry` x2 (`app`) |
