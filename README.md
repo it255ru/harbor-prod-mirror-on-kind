@@ -135,7 +135,7 @@ The failure tests are scripts in `hack/tests/`. They run real load, kill real no
 | `h45-app-rollout.sh` | rolls the demo app to a freshly pushed tag; `DEGRADE=1` with one registry and one core killed | 1 min |
 | `h46-proxy-cache.sh` | proxy-cache project for Docker Hub, served from the cache with the upstream cut off | 4 min |
 | `h62-sync-mode.sh <off\|on\|strict>` | what Patroni `synchronous_mode` changes: deletes the replica pod, then the leader pod under a writer; restores the config | 4 min |
-| `h47-role-failure.sh <lb\|pg\|redis\|consul>` | kills the node of the role holder under load, checks lost acknowledged writes | 5 min each |
+| `h47-role-failure.sh <lb\|pg\|redis\|consul\|s3>` | kills the node of the role holder under load, checks lost acknowledged writes (`s3`: the objects in the bucket) | 3-5 min each |
 
 ## Failure behaviour (measured)
 
@@ -150,6 +150,7 @@ Measured on this stack (Harbor 2.14.3, PostgreSQL 15.19, Keepalived + HAProxy), 
 | Redis master node | ~21-25 s without Redis: requests stall up to 21 s, 1 of 38 pushes failed; core/jobservice are **not** restarted | no acknowledged write lost |
 | PostgreSQL primary node | ~33 s without writes, 5xx for requests that need the database (122 of 690 manifests, 37 of 243 blobs, 1 of 32 pushes; 0 of 623 pulls) | none lost in the test, but replication is asynchronous |
 | `lb` node that holds the Infra LB address (VIP) | the VIP moves to the other node: 2 of 621 manifests failed, longest gap 5.2 s, 0 pull/push failures; no second blip when the node returns (`nopreempt`); new connections to PostgreSQL/Redis through the dead HAProxy fail (19 of 421 / 24 of 442) | intact |
+| `s3` node (Garage, the only one, no redundancy) | the whole data path of the registry is down while the node is (~110 s without a successful request through the VIP, manifests are in S3 too; `docker pull` waits up to 65 s and completes; UI, API, PostgreSQL and Redis are not affected); Harbor recovers on its own 13 s after the node returns, no Harbor pod restarts | intact (209 of 209 objects) |
 
 The windows come from settings: Kubernetes ~47-52 s to declare a node lost, Sentinel `down-after` 15 s, Patroni TTL 30 s, VRRP failover of the Infra LB address. After the node returns everything is healthy again on its own within about a minute.
 

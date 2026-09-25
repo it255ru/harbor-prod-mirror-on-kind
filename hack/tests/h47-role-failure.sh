@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # H4.7 (backlog): lose the node of one role of the scheme while the stand is under load.
 #
-# usage: hack/tests/h47-role-failure.sh <lb|pg|redis|consul>
+# usage: hack/tests/h47-role-failure.sh <lb|pg|redis|consul|s3>
 # env:   HOLD (seconds to keep the node down after the failover is detected, default 45), WORKDIR,
 #        HARBOR_HOST, HARBOR_AUTH
 #
@@ -11,6 +11,8 @@
 #   pg     the node of the current Patroni leader        (Patroni must promote the replica through Consul)
 #   redis  the node of the current Valkey master         (Sentinel must promote a replica)
 #   consul the node of the current Consul raft leader    (a new leader must be elected, Patroni must not fail over)
+#   s3     the node of Garage (the only s3 node, no redundancy: there is no failover, the S3 store is down while the node is; the
+#          test checks that Harbor works again on its own afterwards and that the objects in the bucket are all still there)
 # The node is killed with `docker kill` (no graceful shutdown) and brought back with `docker start`.
 #
 # Load, all in parallel, no client retries where noted:
@@ -22,7 +24,7 @@
 # At the end the acknowledged writes are compared with what the databases hold (lost acknowledged writes), and
 # the analysis (hack/tests/h47_analyze.py) prints errors and outage windows per phase.
 set -uo pipefail
-ROLE=${1:?usage: h47-role-failure.sh <lb|pg|redis|consul>}
+ROLE=${1:?usage: h47-role-failure.sh <lb|pg|redis|consul|s3>}
 HOLD=${HOLD:-45}
 HOST=${HARBOR_HOST:-core.harbor.domain}; AUTH=${HARBOR_AUTH:-admin:Harbor12345}
 API=https://$HOST/api/v2.0
@@ -57,6 +59,7 @@ case "$ROLE" in
   pg)     BEFORE=$(pg_leader);     VICTIM=$(node_of "$BEFORE") ;;
   redis)  BEFORE=$(redis_master);  VICTIM=$(node_of "$BEFORE") ;;
   consul) BEFORE=$(consul_leader); VICTIM=$(node_of "$BEFORE") ;;
+  s3)     BEFORE=garage-0;         VICTIM=$(node_of garage-0) ;;
   *) echo "unknown role $ROLE"; exit 2 ;;
 esac
 [ -n "$VICTIM" ] && [ -n "$BEFORE" ] || { echo "!! cannot determine the victim for $ROLE (leader='$BEFORE' node='$VICTIM')"; exit 1; }
@@ -70,6 +73,7 @@ failover_done() {
     pg)     n=$(pg_leader_from "$SURV_PG"); [ -n "$n" ] && [ "$n" != "$BEFORE" ] ;;
     redis)  n=$(kubectl -n $NS exec "$SURV_REDIS" -c sentinel -- valkey-cli -p 26379 sentinel get-master-addr-by-name mymaster 2>/dev/null | head -1 | cut -d. -f1); [ -n "$n" ] && [ "$n" != "$BEFORE" ] ;;
     consul) n=$(kubectl -n $NS exec "$SURV_CONSUL" -- consul operator raft list-peers 2>/dev/null | awk '$4=="leader"{print $1}'); [ -n "$n" ] && [ "$n" != "$BEFORE" ] ;;
+    s3)     true ;;   # a single node, nothing to fail over to
   esac
 }
 healthy() {  # the role is fully back
@@ -78,8 +82,10 @@ healthy() {  # the role is fully back
     pg)     kubectl -n $NS exec "$SURV_PG" -- patronictl -c /etc/patroni/patroni.yml list -f json 2>/dev/null | python3 -c "import sys,json; m=json.load(sys.stdin); sys.exit(0 if len(m)==2 and sorted(x['Role'] for x in m)==['Leader','Replica'] and all(x['State'] in ('running','streaming') for x in m) else 1)" ;;
     redis)  [ "$(for i in 0 1 2; do kubectl -n $NS exec redis-$i -c valkey -- valkey-cli role 2>/dev/null | head -1; done | sort | paste -sd' ')" = "master slave slave" ] && kubectl -n $NS exec "$SURV_REDIS" -c sentinel -- valkey-cli -p 26379 sentinel ckquorum mymaster 2>/dev/null | grep -q "^OK 3" ;;
     consul) [ "$(kubectl -n $NS exec "$SURV_CONSUL" -- consul operator raft list-peers 2>/dev/null | awk 'NR>1' | wc -l)" = 3 ] ;;
+    s3)     [ "$(kubectl -n $NS get pod garage-0 -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)" = true ] && [ "$(curl -sk -u "$AUTH" -o /dev/null -w '%{http_code}' -m 10 "https://$HOST/v2/python/hello/manifests/1.0" -H 'Accept: application/vnd.docker.distribution.manifest.v2+json')" = 200 ] ;;
   esac
 }
+s3_objects() { kubectl -n $NS exec garage-0 -- /garage bucket info registry-blobs 2>/dev/null | awk '/^Objects:/{print $2}'; }
 
 echo "== H4.7 role failure: $ROLE   victim node: $VICTIM   (current $ROLE leader/holder: $BEFORE)"
 echo "   pods on the victim: $(kubectl get pods -A -o wide --no-headers | awk -v n="$VICTIM" '$8==n||$7==n{print $2}' | grep -vE 'kindnet|kube-proxy' | paste -sd' ')"
@@ -100,6 +106,7 @@ kubectl wait --for=condition=ready pod/h47-pgw pod/h47-redisw --timeout=120s >/d
 
 restart_snapshot() { kubectl get pods -A -o custom-columns=P:.metadata.namespace,N:.metadata.name,R:.status.containerStatuses[*].restartCount --no-headers 2>/dev/null | awk '{n=0; for(i=3;i<=NF;i++) if ($i ~ /^[0-9]+$/) n+=$i; print $1"/"$2, n}' | sort; }
 restart_snapshot > restarts.before
+[ "$ROLE" = s3 ] && { OBJ_BEFORE=$(s3_objects); echo "   objects in registry-blobs before: $OBJ_BEFORE"; }
 MANIFEST=$(curl -sk -u "$AUTH" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "https://$HOST/v2/python/hello/manifests/1.0")
 BLOB=$(echo "$MANIFEST" | python3 -c "import sys,json; d=json.load(sys.stdin); print(max(d['layers'],key=lambda l:l['size'])['digest'])")
 
@@ -149,6 +156,7 @@ touch "$STOP"; wait
 
 # ---------- integrity of acknowledged writes
 echo "== integrity of acknowledged writes"
+[ "$ROLE" = s3 ] && echo "   objects in registry-blobs: before ${OBJ_BEFORE:-?}, after $(s3_objects) (pushes during the outage add none for the failed ones, nothing may be lost)"
 kubectl logs --timestamps h47-pgw > pgw.log 2>/dev/null; kubectl logs --timestamps h47-redisw > redisw.log 2>/dev/null
 kubectl -n $NS exec pg-0 -- psql "postgresql://harbor:$PGPW@harbor-lb.$NS:5432/registry" -Atc "select id from h47_probe order by id" > pg_ids.txt 2>pg_ids.err
 RFINAL=$(kubectl -n $NS exec redis-0 -c valkey -- valkey-cli -h harbor-lb.$NS get h47:counter 2>/dev/null)
