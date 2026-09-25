@@ -139,6 +139,15 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       terminationGracePeriodSeconds: 30
+      initContainers:
+        # same reason as in postgres.yaml: the directory of the volume on a replaced node belongs to root (Valkey: "Can't open or
+        # create append-only dir appendonlydir: Permission denied")
+        - name: fix-perms
+          image: valkey/valkey:9.0.6-alpine3.24@sha256:187679e3bd4036959631e3f03983ab2ba503ab21e6fd0454d508e909db2ee989
+          command: [sh, -c, "chown 999:1000 /data"]
+          securityContext: {runAsUser: 0, runAsGroup: 0}
+          volumeMounts:
+            - {name: data, mountPath: /data}
       containers:
         - name: valkey
           image: valkey/valkey:9.0.6-alpine3.24@sha256:187679e3bd4036959631e3f03983ab2ba503ab21e6fd0454d508e909db2ee989

@@ -105,6 +105,16 @@ spec:
       securityContext:
         fsGroup: 70
       terminationGracePeriodSeconds: 60
+      initContainers:
+        # A PV bound to a node that was replaced points at a directory that kubelet created on the new node: owned by root, 0755
+        # (fsGroup is not applied to hostPath volumes), so pg_basebackup failed with "Permission denied" (backlog h50).
+        - name: fix-perms
+          image: harbor-ha/patroni:4.1.5-pg15.19
+          imagePullPolicy: Never
+          command: [sh, -c, "chown 70:70 /var/lib/postgresql/data"]
+          securityContext: {runAsUser: 0}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
       containers:
         - name: patroni
           image: harbor-ha/patroni:4.1.5-pg15.19
