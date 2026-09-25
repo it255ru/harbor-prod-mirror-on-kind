@@ -2,7 +2,7 @@
 
 Repo: **harbor-prod-mirror-on-kind** (https://github.com/it255ru/harbor-prod-mirror-on-kind). Fork of `harbor-active-active-on-kind` @ `7279079` (itself a fork of `harbor-on-kind` @ `b65df71`; full history kept). The same 14-node KinD HA lab, aimed at mirroring one specific production stand: Harbor **2.14.3** (chart `1.18.3`), **Keepalived + HAProxy** as the Infra LB (no MetalLB/ingress-nginx), external PostgreSQL **15.19** under Patroni + Consul, Redis Sentinel, Garage S3 (stands in for Ceph RGW).
 
-**Status (2026-09-25):** the plan `P0–P6` in `backlog.md` is complete. The stand builds from scratch (`make cluster` → `ha-deps` → `infra-lb` → `harbor-ha` → `deploy-app`, about 10 minutes with the image cache), `make verify` gives 38 PASS / 0 FAIL, and the failure tests `hack/tests/h41…h49`, `h62` were run on this stack; measured timings are in `backlog.md` → P5 and the failure-behaviour table in `README.md`. The parent's full backlog is `git show 7279079:backlog.md`; what still applies from it is in `backlog.md` → "Что унаследовано".
+**Status (2026-09-25):** the plan `P0–P6` in `backlog.md` is complete. The stand builds from scratch (`make cluster` → `ha-deps` → `infra-lb` → `harbor-ha` → `deploy-app`, about 10 minutes with the image cache), `make verify` gives 38 PASS / 0 FAIL, and the failure tests `hack/tests/h41…h50`, `h62` were run on this stack; measured timings are in `backlog.md` → P5 and the failure-behaviour table in `README.md`. The parent's full backlog is `git show 7279079:backlog.md`; what still applies from it is in `backlog.md` → "Что унаследовано".
 
 ## Rules
 
@@ -55,7 +55,7 @@ make cluster-ctx     # kubectl use-context kind-harbor
 make cluster-delete
 ```
 
-Variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOCALBIN`, `PG_IMAGE`. Tests: `hack/tests/h41…h49`, `h62-sync-mode.sh` (see `README.md`). Checks: `docs/verification-runbook.md` (V1–V12, P4.1–P4.9); run the relevant ones after any change to `hack/ha/` or `hack/config/` and keep the runbook in sync.
+Variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOCALBIN`, `PG_IMAGE`. Tests: `hack/tests/h41…h50`, `h62-sync-mode.sh` (see `README.md`). Checks: `docs/verification-runbook.md` (V1–V12, P4.1–P4.10); run the relevant ones after any change to `hack/ha/` or `hack/config/` and keep the runbook in sync.
 
 ## Gotchas
 
@@ -90,6 +90,8 @@ Variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOC
 - The scripts always restore what they change (killed node started again, `tc` removed, CoreDNS Corefile restored). If one is interrupted: `docker start <node>`, check `kubectl get nodes`, `docker exec harbor-worker tc qdisc show dev eth0` (expect `noqueue`) and `kubectl -n kube-system get cm coredns` (the original Corefile has no `template` block; then `rollout restart deploy/coredns`).
 - Trivy runs as 2 replicas (`hack/config/harbor-ha.yaml`, one per app node, own PVC, ~1.3 GB of databases each; the Service has `PreferSameNode`): `make verify` V11.4 expects exactly the PVCs `data-harbor-trivy-0` and `-1`.
 - Replacing an `app` node (`h48`): `kind` cannot add a node to a running cluster, so the script builds a `kindest/node` container and runs `kubeadm join` with the dead node's `/kind/kubeadm.conf`; a node with the same name takes over the pods bound to that name. The `local-path` PVC of a Trivy replica is bound to its node: delete the PVC and the pod of the replica that lived on the dead node (`kubectl delete pvc data-harbor-trivy-N; kubectl delete pod harbor-trivy-N`). Load the cached images into the new node (`hack/image-cache.sh load`) or it pulls from Docker Hub.
+- Replacing a node that holds state (`h50`): the `local-path` volume directory of the new node is created by root, so a Patroni replica (`pg_basebackup … Permission denied`) and Valkey (`Can't open or create append-only dir … Permission denied`) do not start by themselves: delete the PVC and the pod of the member (`kubectl -n harbor-deps delete pvc data-<pod>; kubectl -n harbor-deps delete pod <pod>`). Consul heals itself. The locally built Patroni image is not in the cache: `kind load docker-image` it into a new `pg` node (the script does). Losing the `s3` node loses every blob (D1, no redundancy): afterwards delete the stale Harbor repositories through the API, `flushdb` on Redis db 2 (the registry's blob-descriptor cache, otherwise a re-push skips the layers) and push the images again.
+- `synchronous_mode` is off (D8); if it is on, the replica role is `Sync Standby` (`make verify` V5.1 and `h47` accept it).
 - H4.6 needs a fresh proxy project name per run (deleting through the API leaves blobs in S3) and does its cold pull with `curl`: docker's content store hides blobs from Harbor. Cached content is addressed by digest, tag pulls need the upstream.
 
 ## Coupling of the entry path

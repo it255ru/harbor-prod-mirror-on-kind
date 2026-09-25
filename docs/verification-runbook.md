@@ -681,11 +681,40 @@ hack/tests/h49-trivy-node-loss.sh                  # harbor-worker2 (нода с
 
 Ожидается (приёмка 2026-09-25): все сканы во всех фазах `Success` (контроль 11 из 11, во время потери ноды **15 из 15**, после 3 из 3), время до `Success` ≈ 4–6 с; после возврата ноды `harbor-trivy` `2/2`. Если сканы во время потери падают — проверить `kubectl get pods -l component=trivy -o wide` (две реплики на разных нодах?), `kubectl get svc harbor-trivy -o jsonpath='{.spec.trafficDistribution}'` (`PreferSameNode`) и что у обеих реплик есть база (`kubectl exec harbor-trivy-N -- du -sm /home/scanner/.cache`, около 1400 МБ).
 
+### P4.10 Постоянная потеря и замена ноды с состоянием (pg, redis, consul, s3)
+
+Разрушающая проверка: убивается **без возврата** нода держателя роли, затем заменяется новой; тома `local-path` на новой ноде пусты. Сценарий `hack/tests/h50-stateful-node-replace.sh` (использует `hack/tests/lib-node.sh` для сборки ноды): запускать по одной роли на здоровом стенде, `loadavg` < 3.
+
+```bash
+hack/tests/h50-stateful-node-replace.sh pg        # нода лидера Patroni
+hack/tests/h50-stateful-node-replace.sh redis     # нода master Valkey
+hack/tests/h50-stateful-node-replace.sh consul    # нода лидера raft
+hack/tests/h50-stateful-node-replace.sh s3        # нода Garage: ПОТЕРЯ ВСЕХ БЛОБОВ, образы придётся запушить заново
+# необязательно: HEAL_WAIT=240 (сколько секунд ждать самовосстановления роли до применения лечения)
+```
+
+Что делает: пишет маркерные данные обычным путём (строки в PostgreSQL, ключи Redis и Consul; для s3 запоминает число объектов), убивает ноду, ждёт NotReady, удаляет объект ноды и контейнер, собирает замену, догружает образы роли (образ Patroni собирается локально и не входит в кэш: для `pg` скрипт делает `kind load docker-image`), ждёт самовосстановления роли `HEAL_WAIT` секунд, при неудаче применяет лечение, проверяет маркеры и печатает временную шкалу.
+
+Ожидается (приёмка 2026-09-25):
+
+| Роль | Само поднялось? | Лечение | Данные |
+|------|-----------------|---------|--------|
+| consul | да, через ≈ 17 с после загрузки образов (≈ 2 мин от потери) | не нужно | 10 из 10 ключей |
+| redis | нет: `CrashLoopBackOff`, `Can't open or create append-only dir appendonlydir: Permission denied` | удалить PVC и под: `kubectl -n harbor-deps delete pvc data-redis-N; kubectl -n harbor-deps delete pod redis-N`; здоров через ≈ 7 с | 50 из 50 ключей |
+| pg | нет: `pg_basebackup: could not create directory ".../pgdata": Permission denied`, реплика не создаётся | то же для `pg-N`; здоров через ≈ 24 с (участник заново снимает `pg_basebackup` с лидера) | 200 из 200 строк |
+| s3 | Garage стартует пустым и без раскладки, роль не здорова | `make s3` (идемпотентна): раскладка, бакет `registry-blobs`, ключ `harbor` | **потеряно всё** (211 из 211 объектов) |
+
+Причина `Permission denied` у pg и redis: каталог тома `local-path` на новой ноде создаёт kubelet от root, процессы БД работают не под root, а `fsGroup` для `hostPath`-томов не применяется; свежий PVC создаёт provisioner с открытыми правами. Возможное улучшение (не сделано): init-контейнер с `chown` в StatefulSet'ах.
+
+**Восстановление Harbor после потери блобов (s3).** Запись об артефактах остаётся в БД Harbor, а registry держит кэш описателей блобов в Redis (база 2): при повторной загрузке он считает слои уже существующими и не загружает их, `pull` даёт `manifest unknown`, поды demo — `ErrImagePull`. Лечение: (1) удалить устаревшие репозитории через API (`curl -sk -u admin:Harbor12345 -X DELETE https://core.harbor.domain/api/v2.0/projects/python/repositories/hello`), (2) сбросить кэш registry: `kubectl -n harbor-deps exec redis-0 -c valkey -- sh -c 'valkey-cli -h harbor-lb.harbor-deps -n 2 flushdb'`, (3) заново запушить образы (`make deploy-app`). После всех замен `make verify` — без `FAIL`. Если скрипт прерван: `kubectl get nodes`, `kubectl -n harbor-deps get pods`, затем лечение по таблице.
+
+Не проверяется: замена `lb`-ноды (локально собранный образ Keepalived нужно загрузить `kind load`, как образ Patroni) и потеря control-plane.
+
 ### P6.2 `synchronous_mode` Patroni (справочная проверка, H6.2)
 
 Стенд работает с асинхронной репликацией (`synchronous_mode` выключен, D8). Скрипт `hack/tests/h62-sync-mode.sh <off|on|strict>` включает режим, удаляет под реплики, затем под лидера под нагрузкой писателя (запись через `harbor-lb` каждые ≈ 0,3 с), печатает паузы записи и потерянные подтверждённые строки и возвращает конфигурацию в исходное состояние (проверка: `patronictl show-config` не содержит `synchronous`). Около 4 минут на режим; запускать по одному на здоровом стенде.
 
-Ожидается (измерено на этом стенде 2026-09-25): `off` — потеря реплики не прерывает запись (пауза ≤ 0,3 с), потеря лидера: пауза 10,3 с, 3 отказа записи; `on` — реплика: без пауз, лидер: пауза 7,3 с, 3 отказа; `strict` — потеря реплики блокирует запись на ≈ 16 с (самая медленная запись 15,7 с), потеря лидера: пауза 15,2 с, 2 отказа; во всех режимах `LOST acknowledged: 0`. Как включить на стенде и что меняется в тестах: `backlog.md`, H6.2. При включённом режиме роль реплики в `patronictl list` — `Sync Standby`, и проверка V5.1 (`ansible/roles/verify_postgres`) её не признает.
+Ожидается (измерено на этом стенде 2026-09-25): `off` — потеря реплики не прерывает запись (пауза ≤ 0,3 с), потеря лидера: пауза 10,3 с, 3 отказа записи; `on` — реплика: без пауз, лидер: пауза 7,3 с, 3 отказа; `strict` — потеря реплики блокирует запись на ≈ 16 с (самая медленная запись 15,7 с), потеря лидера: пауза 15,2 с, 2 отказа; во всех режимах `LOST acknowledged: 0`. Как включить на стенде и что меняется в тестах: `backlog.md`, H6.2. Проверено и на реальной потере ноды лидера (`h47 pg` при включённом `on`): 0 потерянных подтверждённых записей, окно записи ≈ 28 с (его определяет TTL Patroni), старый лидер возвращается `Sync Standby`. При включённом режиме роль реплики в `patronictl list` — `Sync Standby`, и проверка V5.1 (`ansible/roles/verify_postgres`) её не признает.
 
 ## Диагностика
 
@@ -720,13 +749,15 @@ hack/tests/h49-trivy-node-loss.sh                  # harbor-worker2 (нода с
 | Адрес Infra LB (`172.20.0.100`) недоступен после потери lb-ноды | Keepalived переносит VIP на другую ноду за секунды (в приёмке — самый долгий перерыв 5,2 с); проверить, что второй `infra-lb` жив и на его ноде VIP есть (V3.2), `ip neigh show 172.20.0.100` (MAC совпадает с живой lb-нодой?), логи keepalived |
 | Harbor: `helm upgrade` падает `yaml: ... found character '\t'` в post-renderer | шаблон `trivy-sts.yaml` chart 1.18.3 содержит TAB, PyYAML его не принимает; `hack/helm-postrender.py` убирает хвостовые пробелы и табы до разбора — если ошибка вернулась, проверить, что эта строка на месте |
 | `harbor-trivy-N` в `CrashLoopBackOff` или `Pending` после замены ноды | том `local-path` привязан к погибшей ноде (на новой каталог пуст или PV не подходит): `kubectl delete pvc data-harbor-trivy-N; kubectl delete pod harbor-trivy-N` — Trivy заново скачает базу (≈ 1,3 ГБ); поднимется на любой `app`-ноде |
+| `pg-N` / `redis-N` в `CrashLoopBackOff` после замены ноды: `Permission denied` на каталоге данных | каталог тома `local-path` на новой ноде создан от root: `kubectl -n harbor-deps delete pvc data-<под>; kubectl -n harbor-deps delete pod <под>` (участник заново присоединится к выжившим); см. P4.10 |
+| После потери `s3`-ноды образы не пушатся заново: `manifest unknown`, `already exists` без загрузки слоёв | устаревшие артефакты в БД Harbor и кэш блобов registry в Redis (база 2): удалить репозитории через API, `valkey-cli -n 2 flushdb`, запушить снова; см. P4.10 |
 | Сбросить один компонент | удалить его Secret **и** PVC (`data-<имя>-N`), затем `make <таргет>`; удалять только Secret нельзя: новый пароль не совпадёт с данными |
 | Всё сломалось | `make cluster-delete && make cluster && make ha-deps && make infra-lb && make harbor-ha && make deploy-app` (около 10 минут с кэшем образов: `make images-load` до и после `make cluster`) |
 
 ## Что ранбук не проверяет
 
 - Разрушающие сценарии (Patroni failover, Sentinel failover, потеря `app`-ноды или ноды роли): скрипты `hack/tests/` (раздел 13), результаты — `backlog.md`, P5.
-- Замену нод с состоянием (`pg`, `redis`, `consul`, `s3`), `synchronous_mode` в проде.
+- Замену `lb`-ноды и потерю control-plane, `synchronous_mode` как постоянную настройку в проде.
 - Производительность и нагрузку.
 
 ## Ansible-версия (`make verify`)
