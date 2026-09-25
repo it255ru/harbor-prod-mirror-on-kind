@@ -1,8 +1,10 @@
-# Agent context: harbor-active-active-on-kind
+# Agent context: harbor-prod-mirror-on-kind
 
-Harbor in active-active (HA) mode on KinD: two replicas each of core, portal, registry and jobservice behind ingress, sharing external PostgreSQL (Patroni + Consul), Redis (Valkey + Sentinel) and S3 (Garage) on a 14-node cluster. The stand is built and verified (milestone 1 accepted 2026-09-24; failure tests H4.1–H4.7 and a from-scratch rebuild H5.3 passed). It started as a copy of `harbor-on-kind` @ `b65df71`. The runbook is also an Ansible playbook (`make verify`, H5.4). The image cache for rebuilds exists (`make images-save` / `images-load`, H5.5); nothing else is open.
+Fork of `harbor-active-active-on-kind` @ `7279079` (2026-09-25, full history kept), itself a fork of `harbor-on-kind` @ `b65df71`. Same 14-node KinD HA Harbor lab, retargeted to mirror one specific production stand: Harbor **2.14.3** (chart `1.18.3`), **HAProxy + Keepalived** Infra LB instead of MetalLB/ingress-nginx, external PostgreSQL **15.19** instead of 18.6. Redis Sentinel, Patroni + Consul, Garage are unchanged (decisions D11–D14, `backlog.md`).
 
-Where to start: `backlog.md` (Russian, plan, decisions D1–D10/D4a, pins and results, source of truth), `CLAUDE.md` (rules, pinned versions, commands, gotchas: read it before changing anything), `README.md` (human runbook, sample output, failure behaviour), `docs/stand-topology.md` (nodes, roles, addresses, data, secrets; Russian), `docs/verification-runbook.md` (checks V1–V12 and failure-test procedures P4.1–P4.7; Russian).
+**As of the fork point, `hack/` is still byte-for-byte the parent's** — the layout table below and the parent's whole feature set (Ansible `make verify`, image cache, failure tests H4.1–H4.7/h62) are inherited and correct, but describe the *parent's* architecture (2.15.2, MetalLB, PG 18.6) until `backlog.md`'s P1–P6 plan lands. Work that plan in order; each phase updates this file, `CLAUDE.md` and `README.md` in place as it changes something.
+
+Where to start: `backlog.md` (Russian: this fork's own plan P0–P6 and decisions D11–D14 at the top, the parent's full inherited history below "Унаследовано от родителя" — source of truth), `CLAUDE.md` (rules, pinned versions — both current-and-parent's and this fork's targets, commands, gotchas: read it before changing anything), `README.md` (human runbook, currently describing the parent's stand), `docs/stand-topology.md` (nodes, roles, addresses, data, secrets — parent's, to be updated once the Infra LB changes; Russian), `docs/verification-runbook.md` (checks V1–V12 and failure-test procedures P4.1–P4.7 — parent's; Russian).
 
 ## Layout
 
@@ -42,5 +44,5 @@ Where to start: `backlog.md` (Russian, plan, decisions D1–D10/D4a, pins and re
 - Follow the phase order in `backlog.md`; record results there; ask before making a new design decision.
 - Prefer `make` targets over ad-hoc kind/helm commands; always pin `--version` on Helm installs; pin versions before installing anything new.
 - Do not commit secrets, `ca.crt`, `*.tgz` or `bin/`. Never touch the user's `~/.aws`.
-- `CLUSTER` / `LB_IP` match `harbor-on-kind` on purpose (one lab cluster at a time, D5): `make cluster-delete` the other repo's cluster first.
+- `CLUSTER` / `LB_IP` match `harbor-on-kind` and the parent on purpose (one lab cluster at a time among all three repos, D5): `make cluster-delete` whichever other one is up first.
 - Keep `README.md`, `CLAUDE.md` and this file in sync with `Makefile` / `hack/` when pins, topology or the demo app change.

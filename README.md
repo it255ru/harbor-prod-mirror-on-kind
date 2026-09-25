@@ -1,8 +1,8 @@
-# harbor-active-active-on-kind
+# harbor-prod-mirror-on-kind
 
-Harbor in active-active mode on KinD. Two replicas each of core, portal, registry and jobservice run behind ingress and share an external PostgreSQL (Patroni + Consul), Redis (Valkey + Sentinel) and S3-compatible object storage (Garage). Losing a replica, a node or the holder of any role of the scheme does not lose data or stop push/pull for good; the measured windows are listed below.
+Fork of [harbor-active-active-on-kind](https://github.com/it255ru/harbor-active-active-on-kind) (@ `7279079`, 2026-09-25, full history kept, not pushed anywhere) aimed at one specific production stand rather than the parent's general HA scheme: Harbor **2.14.3** (chart `1.18.3`, not 2.15.2/1.19.2), **HAProxy + Keepalived** as the Infra LB (not MetalLB/ingress-nginx), external PostgreSQL downgraded to **15.19** (not 18.6). Redis Sentinel, Patroni + Consul and Garage are unchanged from the parent — decisions D11-D14 in [backlog.md](backlog.md).
 
-**Status:** built and verified. Milestone 1 (the whole stand works across the 14 nodes) was accepted on 2026-09-24. All failure tests of milestone 2 (H4.1-H4.7) passed and were re-run on a stand rebuilt from scratch. Plan, decisions and results: [backlog.md](backlog.md) (Russian). Node/address map: [docs/stand-topology.md](docs/stand-topology.md). Check-by-check procedure: [docs/verification-runbook.md](docs/verification-runbook.md).
+**Status:** fork just created, target versions pinned — the plan is `backlog.md`'s P0-P6 list, not yet executed beyond P0. Until P1-P6 land, everything below this line still describes the **parent's** stand as it existed at the fork point (Harbor 2.15.2, MetalLB+ingress-nginx, PostgreSQL 18.6) — read it as history, not as what `make cluster && make install` currently gives you on *this* fork's intended architecture; the `hack/` code hasn't changed yet. Node/address map: [docs/stand-topology.md](docs/stand-topology.md). Check-by-check procedure: [docs/verification-runbook.md](docs/verification-runbook.md).
 
 ## Architecture
 

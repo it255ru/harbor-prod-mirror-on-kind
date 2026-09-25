@@ -1,6 +1,54 @@
-# Backlog: Harbor active-active на KinD
+# Backlog: Harbor active-active на KinD — прод-зеркало (форк)
 
-**Статус: в работе — Phase 0–4 выполнены (веха 1 принята пользователем 2026-09-24; веха 2 — H4.1–H4.7 — и приёмка с нуля H5.3 проведены на пересобранном стенде); H5.4 (Ansible), H5.5 (кэш образов) и Phase 6 (H6.1 offline-ветка, H6.2 synchronous_mode) выполнены; всё запланированное закрыто** (создан 2026-09-24). База — `harbor-on-kind` @ `b65df71`: рабочая одно-нодовая лаборатория. Её миграционный backlog (Kind 0.17 → 0.30, K8s 1.26 → 1.34, Harbor 2.8 → 2.15.2; Phase 0–6, все закрыты) сохранён в git-истории этого репозитория и в https://github.com/it255ru/harbor-on-kind.
+**Статус: форк создан 2026-09-25 — версии закреплены (P0), реализация ещё не начата.** Родитель — `harbor-active-active-on-kind` @ `7279079` (весь его backlog, включая закрытые Phase 0–4/H5.x/Phase 6 ниже, унаследован как история; сам он — форк `harbor-on-kind` @ `b65df71`). Полная история сохранена в git.
+
+**Цель форка:** как можно точнее воспроизвести конкретный боевой стенд, а не общую HA-схему родителя: Harbor `2.14.3`, Redis Sentinel (в родителе уже так), HAProxy + Keepalived вместо MetalLB/ingress-nginx на входе. Расхождение с родителем было отмечено ещё в его решении D7: «там общий адрес, вероятно, держит keepalived, в лаборатории — ClusterIP Service / MetalLB» — этот форк его устраняет.
+
+## Новые решения этого форка (2026-09-25)
+
+- **D11 — HAProxy + Keepalived заменяют Infra LB.** MetalLB и ingress-nginx убираются целиком; Keepalived держит плавающий VIP (VRRP) на `lb`-нодах, HAProxy за ним балансирует HTTPS-трафик на Harbor. Решение пользователя.
+- **D12 — Harbor `2.14.3` / chart `1.18.3`, официальный образ Docker Hub.** Прод использует вендорскую/внутреннюю сборку `v2.14.3-fa517e2a` — недоступна из этой сессии (не найдена ни на Docker Hub, ни в официальных релизах goharbor). Решение пользователя: заменить на публичный `v2.14.3`. Если вендорская сборка станет доступна — переключить и перезакрепить digest.
+- **D13 — внешний PostgreSQL понижен до `15.19-alpine3.24`** (у родителя — `18.6-alpine3.24`). Chart `1.18.3` документирует встроенный PostgreSQL `15.12`; решение пользователя — не полагаться на неподтверждённую совместимость с PG 18, взять последний патч той же мажорной ветки 15.x (стиль пина — как у родителя: alpine3.24). Тянет пересборку образа `hack/ha/patroni` (Phase P4).
+- **D14 — образ Keepalived: собственная минимальная сборка (Alpine + `apk add keepalived`), не сторонний образ.** Решение автора плана (не пользователя) — открыто к пересмотру. Причина: тот же урок, что и с MinIO у родителя (D4a) — сторонние образы `keepalived` на Docker Hub не от вендора инфраструктуры, могут исчезнуть или перестать обновляться; собственная сборка по образцу `hack/ha/patroni` контролируема и закрепляется по digest базового слоя.
+- **Patroni/Consul, Redis/Sentinel, S3/Garage — без изменений**, схема и версии как у родителя (решение пользователя: «та же схема»).
+
+## Закреплённые версии (изменения относительно родителя)
+
+| Компонент | У родителя | Здесь |
+|---|---|---|
+| Harbor chart / app | `1.19.2` / `2.15.2` | **`1.18.3` / `2.14.3`** |
+| PostgreSQL (внешний) | `18.6-alpine3.24` | **`15.19-alpine3.24`** |
+| Infra LB | MetalLB `0.16.1` + ingress-nginx `4.15.1` | **HAProxy `3.4.4-alpine3.24` (тот же пин, что у Harbor LB) + Keepalived (своя сборка; версия Alpine и keepalived закрепляются при реализации P2)** |
+
+Digest'ы (проверены 2026-09-25 — `docker pull` образа по тегу + digest из локального реестра):
+
+| Образ | Digest |
+|---|---|
+| `goharbor/harbor-core:v2.14.3` | `sha256:a30e5a8be3d94b6485e7fdd4ed7fdf9e9724ee0a6d103b3804aacf6784ee358e` |
+| `goharbor/harbor-portal:v2.14.3` | `sha256:2556b6c7dd832bf22ed8b177245fa5fbcd70255959e69c5d0fbe2153f4bd2243` |
+| `goharbor/harbor-jobservice:v2.14.3` | `sha256:e2b0298e894d725d68954b786c61c5dd607114f6129534756c8f7985124c07a6` |
+| `goharbor/harbor-registryctl:v2.14.3` | `sha256:ddf6bb429eb6b5a3db3e98bfe6ab3dd2567ebb35547836d87fc54ddacebfac8d` |
+| `goharbor/registry-photon:v2.14.3` | `sha256:6533fc396cbce57131053faec55e1bd1da8b92aed318410c203ff1c7a9b910ab` |
+| `goharbor/trivy-adapter-photon:v2.14.3` | `sha256:5c6f7162804cd94d41672a694579f136ccc9730d024dda9ad24e0f42bdae6f36` |
+| `postgres:15.19-alpine3.24` | `sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81` |
+
+## Известное препятствие, найденное до начала реализации (2026-09-25)
+
+Chart `1.18.3` **не поддерживает** `core.livenessProbe`/`readinessProbe` и `jobservice.livenessProbe`/`readinessProbe` как values — в шаблонах эти поля частично зашиты (core: `failureThreshold: 2`, без `timeoutSeconds`; jobservice: `initialDelaySeconds: 300`, без остального). Фикс родителя из H4.7 (`timeoutSeconds: 5, failureThreshold: 6` в `hack/config/harbor-ha.yaml`, чтобы core/jobservice не перезапускались при отказе Redis) в этой версии чарта через `values.yaml` не задать — будет молча проигнорирован. Переносится в `hack/helm-postrender.py` (Phase P3); без этого нужно заново подтвердить тестом `hack/tests/h47-role-failure.sh redis`, что рестартов не будет.
+
+## План реализации форка
+
+- [x] **P0** Форк создан (`git clone` с полной историей из `harbor-active-active-on-kind` @ `7279079`, `origin` отвязан), decisions D11–D14 приняты, версии и digest'ы закреплены, найдено структурное препятствие с пробами (2026-09-25).
+- [ ] **P1** Ребрендинг документации (`README.md`, `CLAUDE.md`, `AGENTS.md`) под новый стек; `hack/images.txt` — заменить строки MetalLB/ingress-nginx на Keepalived (когда выбран образ) и HAProxy для нового Infra LB, обновить PostgreSQL/Harbor.
+- [ ] **P2** Заменить Infra LB: убрать `make infra-lb`/MetalLB/ingress-nginx, добавить `hack/ha/keepalived.yaml` (VRRP VIP на `lb`-нодах) + HAProxy-фронтенд для HTTPS Harbor; решить (реализационно, не пользователем), объединять ли с существующим Harbor LB (PG/Redis) в один под или разносить.
+- [ ] **P3** Понизить Harbor до chart `1.18.3`/app `2.14.3`: обновить `hack/config/harbor-ha.yaml` (digest'ы, убрать нерабочие ключи проб), перенести relaxed-liveness фикс в `hack/helm-postrender.py`.
+- [ ] **P4** Понизить внешний PostgreSQL до `15.19-alpine3.24`: пересобрать `hack/ha/patroni` (Dockerfile `FROM`), сбросить Secret+PVC, `make postgres`.
+- [ ] **P5** Полная пересборка с нуля + `make verify` + `hack/tests/` (особый акцент на `h47 redis` — фикс проб; `h47 pg` — PostgreSQL 15).
+- [ ] **P6** Документация: `docs/stand-topology.md`, `docs/verification-runbook.md`, финальная сверка `backlog.md`.
+
+---
+
+# Унаследовано от родителя (`harbor-active-active-on-kind`, до фикса выше)
 
 **Цель:** Harbor в active-active — несколько реплик core / portal / registry / jobservice (и, возможно, trivy) за ingress, с общими внешними PostgreSQL, Redis (Valkey) и S3-совместимым хранилищем. Потеря любой одной реплики не должна прерывать push/pull образов и OCI-чартов.
 
