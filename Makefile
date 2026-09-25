@@ -89,7 +89,7 @@ consul: ## Install Consul x3 (DCS for Patroni) on the consul nodes.
 	@kubectl apply -f hack/ha/00-namespace.yaml -f hack/ha/consul.yaml
 	@kubectl -n harbor-deps rollout status statefulset/consul --timeout=300s
 
-PG_IMAGE ?= harbor-ha/patroni:4.1.5-pg18.6
+PG_IMAGE ?= harbor-ha/patroni:4.1.5-pg15.19
 
 .PHONY: pg-image
 pg-image: kind ## Build the PostgreSQL+Patroni image and load it into the pg nodes.

@@ -43,7 +43,7 @@ L=$(leader); PW=$(kubectl -n $NS get secret pg-credentials -o jsonpath='{.data.h
 echo "   synchronous_standby_names on $L: '$(kubectl -n $NS exec "$L" -- psql "postgresql://harbor:$PW@$L.pg-headless:5432/registry" -Atc 'show synchronous_standby_names')'"
 kubectl -n $NS exec "$L" -- psql "postgresql://harbor:$PW@$L.pg-headless:5432/registry" -Atc "drop table if exists h62_probe; create table h62_probe(id bigserial primary key, t timestamptz default now())" >/dev/null
 
-kubectl -n $NS run h62-writer --restart=Never --image=postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873 \
+kubectl -n $NS run h62-writer --restart=Never --image=postgres:15.19-alpine3.24@sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81 \
   --env=PGPASSWORD="$PW" --overrides='{"spec":{"nodeSelector":{"harbor-ha/role":"app"},"tolerations":[{"key":"harbor-ha/role","operator":"Equal","value":"app","effect":"NoSchedule"}]}}' \
   --command -- sh -c 'while true; do s=$(cut -d" " -f1 /proc/uptime); out=$(psql "host=harbor-lb port=5432 user=harbor dbname=registry connect_timeout=3 options=-cstatement_timeout=20000" -Atc "insert into h62_probe default values returning id" 2>&1 | head -1 | cut -c1-60); echo "$s $(cut -d" " -f1 /proc/uptime) $out"; sleep 0.3; done' >/dev/null
 kubectl -n $NS wait --for=condition=ready pod/h62-writer --timeout=90s >/dev/null

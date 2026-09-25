@@ -31,7 +31,7 @@ W="${WORKDIR:-$(mktemp -d)}"; mkdir -p "$W"; cd "$W" || exit 1
 NS=harbor-deps; IMG=$HOST/python/hello:1.0
 now_ms() { date +%s%3N; }
 ev() { echo "$(now_ms) $1" >> events.log; echo "   [$(date +%T)] $1"; }
-PGI=postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+PGI=postgres:15.19-alpine3.24@sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81
 VKI=valkey/valkey:9.0.6-alpine3.24@sha256:187679e3bd4036959631e3f03983ab2ba503ab21e6fd0454d508e909db2ee989
 OV='{"spec":{"nodeSelector":{"harbor-ha/role":"app"},"tolerations":[{"key":"harbor-ha/role","operator":"Equal","value":"app","effect":"NoSchedule"}]}}'
 sec() { kubectl -n $NS get secret "$1" -o "jsonpath={.data.$2}" | base64 -d; }

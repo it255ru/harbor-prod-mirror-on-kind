@@ -1,6 +1,6 @@
 # PostgreSQL + Patroni image (backlog H2.2). No maintained upstream image exists
 # (Spilo's last release is 2023), so Patroni is layered on the pinned PostgreSQL image.
-FROM postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+FROM postgres:15.19-alpine3.24@sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81
 
 RUN apk add --no-cache python3 curl \
  && python3 -m venv /opt/patroni

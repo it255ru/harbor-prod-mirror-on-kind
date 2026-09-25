@@ -107,7 +107,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: patroni
-          image: harbor-ha/patroni:4.1.5-pg18.6
+          image: harbor-ha/patroni:4.1.5-pg15.19
           imagePullPolicy: Never  # loaded into the pg nodes by `make pg-image`
           env:
             - {name: PATRONI_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}

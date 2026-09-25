@@ -17,7 +17,7 @@ expected_roles: {app: 2, lb: 2, pg: 2, redis: 3, consul: 3, s3: 1}
 expected_tainted_nodes: 13      # every worker; the control-plane has its own taint
 
 # Images for the reachability jobs (V9); the same pins as in hack/ha/*.yaml.
-image_pg: postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+image_pg: postgres:15.19-alpine3.24@sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81
 image_valkey: valkey/valkey:9.0.6-alpine3.24@sha256:187679e3bd4036959631e3f03983ab2ba503ab21e6fd0454d508e909db2ee989
 
 # Switches. The checks that write (V5.4, V6.3, V9, V11.6) clean up after themselves.
