@@ -1,11 +1,8 @@
 # Ранбук: проверка стенда
 
-> **P2 (2026-09-25):** Infra LB теперь Keepalived + HAProxy (`hack/ha/infra-lb.yaml`), MetalLB и ingress-nginx удалены, demo-приложение — NodePort `<IP control-plane>:30500`. Разделы ниже про MetalLB, ingress-nginx, `172.20.0.101` и анонс адреса устарели — переписываются в P6.
+Как проверить, что лабораторный стенд Harbor active-active собран правильно и здоров. Стек: Harbor 2.14.3 за собственным nginx чарта, Infra LB на Keepalived + HAProxy, PostgreSQL 15.19 под Patroni. Проверки можно запускать в любой момент: после сборки (`make cluster ha-deps infra-lb harbor-ha deploy-app`), после правок манифестов, перед началом новой фазы. Ориентиры и результаты в тексте измерены на стенде 2026-09-25 (приёмка P5: `make verify` 38 PASS / 0 FAIL, тесты отказов h41–h47).
 
-
-Как проверить, что лабораторный стенд Harbor active-active собран правильно и здоров. Это те же проверки, которые выполнялись при аудите перед Phase 3 (2026-09-24); их можно запускать самому в любой момент: после `make cluster infra-lb ha-deps`, после правок манифестов, перед началом новой фазы.
-
-Ранбук проверяет **состояние и распределение** (веха 1). Отказоустойчивость (падение primary PostgreSQL, master Redis, HAProxy, ноды) сюда не входит: это Phase 4 / веха 2 в `backlog.md`.
+Ранбук проверяет **состояние и распределение** (веха 1). Отказоустойчивость (падение primary PostgreSQL, master Redis, ноды роли, потеря `app`-ноды) проверяют скрипты `hack/tests/` — раздел 13.
 
 Те же проверки выполняет плейбук Ansible (`make verify`, последний раздел): у каждой проверки есть идентификатор, команда, ожидаемый результат и что делать при отказе.
 
@@ -14,7 +11,7 @@
 Схема стенда (ноды, роли, адреса, порты): `docs/stand-topology.md`.
 
 ```bash
-cd harbor-active-active-on-kind
+cd harbor-prod-mirror-on-kind
 make cluster-ctx                     # контекст kind-harbor
 kubectl config current-context       # ожидается: kind-harbor
 ```
@@ -24,7 +21,7 @@ kubectl config current-context       # ожидается: kind-harbor
 | Что | Значение | Откуда |
 |-----|----------|--------|
 | Namespace зависимостей | `harbor-deps` | `hack/ha/00-namespace.yaml` |
-| Адрес Infra LB | `172.20.0.100` | `Makefile` (`LB_IP`) |
+| Адрес Infra LB (VIP Keepalived) | `172.20.0.100` | `Makefile` (`LB_IP`), `hack/ha/infra-lb.yaml` |
 | Роли и число нод | `app` 2, `lb` 2, `pg` 2, `redis` 3, `consul` 3, `s3` 1 | `hack/config/kind-cluster.yaml` |
 
 Признак успеха везде указан в строке «Ожидается». Если результат отличается, смотрите «При отказе» и раздел «Диагностика» в конце.
@@ -89,7 +86,6 @@ kubectl get pods -A -o custom-columns=NS:.metadata.namespace,POD:.metadata.name,
   | awk 'NR==FNR{r[$1]=$2; next}
          $1!="kube-system" && $1!="local-path-storage" && $5=="Running" {
            want=$4
-           if (want=="<none>" && $2 ~ /^(ingress-nginx|metallb)/) want="lb"   # у этих подов свой способ закрепления (affinity)
            if (want=="<none>") print "NO-SELECTOR", $2
            else if (r[$3]!=want) print "MISPLACED", $2, "want", want, "on", r[$3]
          }' /tmp/noderoles.txt -
@@ -114,40 +110,46 @@ kubectl -n harbor-deps get pods -o wide
 
 ## 3. Infra LB
 
-**V3.1 Две реплики ingress-nginx на разных `lb`-нодах**
+Keepalived (VIP `172.20.0.100`) и HAProxy (TCP passthrough на nginx Harbor) — один DaemonSet `infra-lb` на двух `lb`-нодах, hostNetwork (`hack/ha/infra-lb.yaml`).
+
+**V3.1 Два пода `infra-lb` (haproxy + keepalived) на разных `lb`-нодах**
 
 ```bash
-kubectl get pods -o wide --no-headers | grep ingress-nginx-controller | awk '{print $1,$2,$3,$7}'
+kubectl -n harbor-deps get pods -l app=infra-lb -o wide
 ```
 
-Ожидается: 2 пода `1/1 Running` на `harbor-worker3` и `harbor-worker4` (или тех нодах, что имеют роль `lb`).
+Ожидается: 2 пода `2/2 Running` на `harbor-worker3` и `harbor-worker4` (или тех нодах, что имеют роль `lb`).
 
-**V3.2 Адрес балансировщика**
+**V3.2 VIP на ровно одной `lb`-ноде**
 
 ```bash
-kubectl get svc ingress-nginx-controller --no-headers | awk '{print $4}'       # Ожидается: 172.20.0.100
+for n in $(kubectl get nodes -l harbor-ha/role=lb -o name | sed 's|node/||'); do echo "$n $(docker exec $n ip -4 addr show eth0 | grep -c ' 172.20.0.100/')"; done
 docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' kind      # Ожидается: содержит 172.20.0.0/16
 ```
 
-При отказе (подсеть другая): менять `LB_IP` и связанные файлы, см. README, «Load balancer IP».
+Ожидается: одна нода с `1`, другая с `0`; подсеть содержит `172.20.0.0/16`. Состояние VRRP: `kubectl -n harbor-deps logs <infra-lb-под> -c keepalived | grep STATE` (одна нода `MASTER`, другая `BACKUP`).
+
+При отказе (подсеть другая): менять `LB_IP`, `virtual_ipaddress` в `infra-lb.yaml` и связанные файлы, см. README, «Load balancer IP».
 
 **V3.3 Балансировщик отвечает с хоста**
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -m 5 http://172.20.0.100/              # Ожидается: 404
-curl -sk -o /dev/null -w '%{http_code}\n' -m 5 https://172.20.0.100/            # Ожидается: 404
+curl -s -o /dev/null -w '%{http_code}\n' -m 5 http://172.20.0.100/              # Ожидается: 301 (редирект nginx Harbor на https)
+curl -sk -o /dev/null -w '%{http_code}\n' -m 5 https://172.20.0.100/            # Ожидается: 200 (UI Harbor)
+ping -c1 -W2 172.20.0.100                                                       # отвечает: VIP держит контейнер-нода
 ```
 
-`404` от default backend ingress-nginx — норма, пока не установлен Harbor (правил Ingress ещё нет). Отсутствие ответа — см. «Диагностика», раздел MetalLB. `ping` не отвечает и не должен: MetalLB в L2-режиме на ICMP не отвечает.
+Проверка предполагает установленный Harbor. Без него HAProxy принимает соединения, но бэкендов нет (`harbor-nginx-headless` пуст): `https` обрывается сразу (`curl` код `000`, ошибка `35`).
 
-**V3.4 Компоненты MetalLB**
+**V3.4 HAProxy Infra LB видит оба nginx Harbor `UP` (на обеих нодах)**
 
 ```bash
-kubectl get pods --no-headers | grep -E 'metallb' | awk '{print $1,$2,$3}'
-kubectl get ipaddresspool,l2advertisement -A --no-headers
+for n in $(kubectl get nodes -l harbor-ha/role=lb -o name | sed 's|node/||'); do
+  docker exec $n curl -s 'http://127.0.0.1:8405/stats;csv' | awk -F, -v n=$n '$1=="harbor_https" && $2 ~ /^nginx[0-9]/ && $18=="UP"{c++} END{print n, c+0, "UP"}'
+done
 ```
 
-Ожидается: controller, 2 speaker, 2 frr-k8s, statuscleaner — все `Running`; пул `172.20.0.100-172.20.0.110` и `l2advertisement`.
+Ожидается: по `2 UP` на каждой `lb`-ноде (бэкенды `nginx3`/`nginx4` — свободные слоты `server-template`, у них `MAINT`). Проверка бэкенда — TCP + TLS-handshake (`L6OK` в колонке `check_status`); если бы она шла HTTP-запросом через nginx к core, при отказе `app`-ноды HAProxy выключал бы оба nginx (см. «Диагностику»).
 
 ## 4. Consul
 
@@ -338,18 +340,18 @@ df -h /                                                                         
 sysctl fs.inotify.max_user_instances fs.inotify.max_user_watches                 # 2048 и 1048576
 ```
 
-Ориентиры (2026-09-24, без Harbor): около 3,9 ГиБ на 14 нод; control-plane около 740 МиБ, `lb`-ноды 500–540, `pg` 290–310, `s3` около 360, остальные 120–180. Со всем стендом (измерено 2026-09-24, H5.3/H5.4): около 4,5–6 ГиБ в покое, `make verify` (V10.1) печатает текущее значение.
+Ориентиры: со всем стендом около 4,4 ГиБ в покое на 14 нод (измерено 2026-09-25, `make verify` V10.1 печатает текущее значение; у родителя без Harbor — около 3,9 ГиБ).
 
 ## 11. Harbor (после `make harbor-ha` и `make deploy-app`)
 
 **V11.1 Реплики и размещение**
 
 ```bash
-kubectl get pods -o custom-columns=C:.metadata.labels.component,NODE:.spec.nodeName --no-headers | grep -E '^(core|portal|registry|jobservice)' | sort | uniq -c
+kubectl get pods -o custom-columns=C:.metadata.labels.component,NODE:.spec.nodeName --no-headers | grep -E '^(nginx|core|portal|registry|jobservice)' | sort | uniq -c
 kubectl get pods --no-headers | grep -E 'harbor-(database|redis)' | wc -l      # внутренних БД и Redis нет: ожидается 0
 ```
 
-Ожидается: 8 строк с `1` (по одному поду каждого компонента на `harbor-worker` и `harbor-worker2`, то есть на обеих `app`-нодах); значение `2` в строке означает, что обе реплики на одной ноде (проверять после каждого rollout); `0` внутренних баз. Размещение по ролям проверяет V2.4. У jobservice 2-3 рестарта после первого запуска — штатная гонка со стартом core.
+Ожидается: 10 строк с `1` (по одному поду nginx, core, portal, registry, jobservice на `harbor-worker` и `harbor-worker2`, то есть на обеих `app`-нодах); значение `2` в строке означает, что обе реплики на одной ноде (проверять после каждого rollout); `0` внутренних баз. Размещение по ролям проверяет V2.4. У jobservice 2-3 рестарта после первого запуска — штатная гонка со стартом core.
 
 **V11.2 UI, API и токены**
 
@@ -357,7 +359,10 @@ kubectl get pods --no-headers | grep -E 'harbor-(database|redis)' | wc -l      #
 curl -sk -o /dev/null -w '%{http_code}\n' https://core.harbor.domain/                  # Ожидается: 200
 curl -sk -o /dev/null -w '%{http_code}\n' https://core.harbor.domain/v2/               # Ожидается: 401 (registry жив, нужен токен)
 echo Harbor12345 | docker login core.harbor.domain -u admin --password-stdin           # Ожидается: Login Succeeded
+curl -sk -u admin:Harbor12345 https://core.harbor.domain/api/v2.0/systeminfo | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["harbor_version"], d["registry_storage_provider_name"])'   # v2.14.3-fa517e2a s3
 ```
+
+`v2.14.3-fa517e2a` — это версия официального образа `v2.14.3` (`fa517e2a` — git-коммит), ровно то, что показывает прод.
 
 Если `docker login` даёт 500 и в логах core `unable to get PrivateKey from PEM type: PRIVATE KEY` — ключ токена в формате PKCS#8; см. «Диагностика».
 
@@ -365,7 +370,7 @@ echo Harbor12345 | docker login core.harbor.domain -u admin --password-stdin    
 
 ```bash
 make deploy-app                                                                          # проект, build/push, деплой; в конце Demo app ready
-curl -s http://172.20.0.101:5000/                                                        # Hello, Kube! (from <pod>)
+curl -s http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' harbor-control-plane):30500/    # Hello, Kube! (from <pod>); NodePort demo-приложения
 ```
 
 Чарт: `helm registry login` → `helm package helm-hello-kube` → `helm push ... oci://core.harbor.domain/python/hello --ca-file ca.crt` → `helm pull`/`helm install` из OCI → `helm test hello-kube` (Phase: Succeeded), команды — в README.
@@ -395,18 +400,20 @@ kubectl rollout restart deploy/harbor-core && kubectl rollout status deploy/harb
 
 ## 12. Распределение нагрузки (критерий 5 вехи 1)
 
-Проверяет, что запросы через Infra LB обслуживаются обеими репликами. Приложения Harbor не пишут access-логи, поэтому считаем по логам ingress-nginx: в записи есть адрес пода-получателя (`upstream`).
+Проверяет, что запросы через Infra LB обслуживаются обеими репликами. Приложения Harbor не пишут access-логи, а nginx обращается к core и portal через Service, поэтому распределение считается там, где оно видно по подам: по access-логу каждого пода nginx (HAProxy → nginx) и по логу каждого пода registry (core → Service registry). Распределение core/portal за Service (kube-proxy) по логам не видно.
+
+Запросы идут по 10 параллельно: core держит по одному постоянному соединению к каждому поду registry, и последовательные запросы (`curl` в цикле) все уходят на один под (в приёмке: 100 из 100 на один под, при 10 параллельных — 41 / 59).
 
 ```bash
 T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-for i in $(seq 1 100); do curl -sk -o /dev/null https://core.harbor.domain/api/v2.0/systeminfo; done   # core
-for i in $(seq 1 100); do curl -sk -o /dev/null https://core.harbor.domain/; done                       # portal
-for c in $(kubectl get pods -l app.kubernetes.io/name=ingress-nginx -o name); do kubectl logs $c --since-time=$T0; done > /tmp/ing.log
+for path in /api/v2.0/systeminfo / /v2/; do
+  seq 100 | xargs -P10 -I{} curl -sk -o /dev/null -u admin:Harbor12345 https://core.harbor.domain$path
+done
+for p in $(kubectl get pods -l app=harbor,component=nginx -o name); do echo "$p nginx: $(kubectl logs $p --since-time=$T0 | grep -c HTTP/1)"; done
+for p in $(kubectl get pods -l app=harbor,component=registry -o name); do echo "$p registry: $(kubectl logs $p -c registry --since-time=$T0 | grep -cE '(GET|HEAD) /v2/')"; done
 ```
 
-Затем разобрать `/tmp/ing.log`: для каждой строки взять имя backend-сервиса в квадратных скобках (`[default-harbor-core-80]` или `[default-harbor-portal-80]`) и IP пода сразу после него, сопоставить IP с подами (`kubectl get pods -o custom-columns=N:.metadata.name,IP:.status.podIP`) и посчитать запросы на каждый под.
-
-Ожидается: у `core` и у `portal` запросы разделены между двумя подами (в приёмке 2026-09-24: core 127/131, portal 50/50). Для registry: после серии `docker rmi` + `docker pull` (например, 20 раз) команда `kubectl logs <registry-pod> -c registry --since-time=$T0 | grep -c 'GET /v2/'` даёт ненулевое значение у обоих подов (в приёмке 20 и 18).
+Ожидается: у обоих подов nginx и у обоих подов registry не меньше 10 % запросов (в приёмке 2026-09-25: nginx 181 / 123, registry 41 / 59).
 
 HAProxy отправляет запросы БД на primary:
 
@@ -467,7 +474,7 @@ for p in $(kubectl get pods -l component=registry -o name); do
 done
 ```
 
-Ожидается: ненулевые PATCH/PUT у обоих подов registry; для core — разбор логов ingress-nginx как в разделе 12 (фильтр путей `/v2/`). В S3 размер бакета вырастает примерно на объём загруженных слоёв (`garage bucket info registry-blobs`, см. V8.1).
+Ожидается: ненулевые PATCH/PUT у обоих подов registry; для nginx — счётчики в его логах, как в разделе 12. В S3 размер бакета вырастает примерно на объём загруженных слоёв (`garage bucket info registry-blobs`, см. V8.1).
 
 Очистка тестовых данных:
 
@@ -500,7 +507,7 @@ hack/tests/h42-kill-during-push.sh core core h42-core            # под core (
 
 - Скрипт печатает `active pod: <под>` и `FORCE DELETE <под>`.
 - `docker push` завершается с `exit=0` и `digest: sha256:...`, в выводе клиента есть строки `Retrying in N s` (клиент повторил загрузку слоя после 502).
-- В сводке кодов ingress-nginx: небольшое число `PATCH 502` в момент убийства, затем успешные `PATCH 202` и `PUT 201`.
+- В сводке кодов nginx Harbor: небольшое число `PATCH 502` в момент убийства, затем успешные `PATCH 202` и `PUT 201`.
 - В конце `pull back` возвращает тот же digest, что и push (целостность).
 - Убитая реплика пересоздана (`kubectl get pods -l component=registry` или `core`: `2/2 Running`, Deployment `2/2`).
 
@@ -520,11 +527,11 @@ hack/tests/h43-rolling-update.sh registry     # только registry
 
 Что делает: запускает через Infra LB три нагрузки (запрос манифеста каждые ~0,1 с; скачивание блоба 13 МБ каждые ~0,4 с; `docker rmi` + `docker pull` подряд), выполняет `kubectl rollout restart` и `rollout status` для каждого компонента, держит нагрузку до и после и печатает разбор по фазам (`baseline`, `rollout-core`, `after-core`, `rollout-registry`, ...). curl не повторяет запросы, то есть каждая ошибка в логе — это ошибка, которую увидел бы клиент; у `docker pull` есть собственные повторы клиента.
 
-Ожидается: в каждой фазе `errors=0` у `manifest` и `blob`, `failed=0` у `docker pull`, самый медленный запрос порядка долей секунды (в приёмке 0,3–0,5 с). Один прогон длится около минуты; для статистики повторить несколько раз (в H4.3 — 4 прогона до исправления и 4 после).
+Ожидается: в каждой фазе `errors=0` у `manifest` и `blob`, `failed=0` у `docker pull`, самый медленный запрос порядка долей секунды (приёмка 2026-09-25: 0 ошибок из 318 манифестов, 114 блобов, 241 pull, самый медленный 0,23 с). Один прогон длится около минуты; для статистики повторить несколько раз.
 
 Перед запуском: все реплики `2/2`, загрузка хоста низкая. Нагрузка лёгкая намеренно (общий диск, см. P4.2).
 
-Если появляются `502` (`http=502`) или паузы около 5 с: смотреть логи core на `proxy error: ... connection refused` и проверить наличие `preStop` (строка в «Диагностике»); `preStop: sleep 15` добавляет `hack/helm-postrender.py` при `make harbor-ha`.
+Если появляются `502` (`http=502`) или паузы около 5 с: смотреть логи core на `proxy error: ... connection refused` и проверить наличие `preStop` (строка в «Диагностике»); `preStop: sleep 15` (nginx, core, registry, portal) добавляет `hack/helm-postrender.py` при `make harbor-ha`.
 
 ### P4.4 Потеря worker-ноды
 
@@ -537,13 +544,17 @@ EVICT_WAIT=0 hack/tests/h44-node-loss.sh harbor-worker   # без ожидани
 
 Что делает: под лёгкой нагрузкой через Infra LB (манифест, блоб, `docker pull`, без повторов в curl) убивает ноду, ждёт `NotReady`, обновления Endpoints, при `EVICT_WAIT=1` — вытеснения подов (~5 мин, `tolerationSeconds: 300`), затем запускает ноду, ждёт `Ready` и `2/2` у всех Deployment'ов Harbor, печатает разбор по фазам (`node-down` до `NotReady`, `endpoints-updated`, `degraded-steady`, `evicted`, `node-up`, `node-ready`, `recovered`).
 
-Ожидается:
+Ожидается (приёмка 2026-09-25, `harbor-worker2`: nginx, core, portal, registry, jobservice, trivy):
 
-- нода `NotReady` примерно через 50 с; в этот момент её поды исчезают из Endpoints;
-- ошибок клиентов нет или единичные `502` у запросов, оборванных в момент падения; `docker pull` завершаются успешно;
-- в фазе `node-down` (до `NotReady`) возможны задержки: манифест/блоб до ~10 с, `docker pull` до ~30 с; после `NotReady` — доли секунды;
-- при ожидании вытеснения (~5 мин) замены core/portal/registry/jobservice в `Pending` (`didn't match pod topology spread constraints`), trivy `Terminating` на мёртвой ноде;
+- нода `NotReady` примерно через 51 с; в этот момент её поды исчезают из Endpoints (`endpoints-updated`);
+- полного отказа нет: манифесты 3 из 1929, блобы 3 из 701, `docker pull` 1 из 1146 (тот, что шёл в момент `docker kill`);
+- до `NotReady` (≈ 52 с) часть запросов **зависает до 30 с** (таймаут клиента): nginx обращается к core и registry через Service, а kube-proxy держит мёртвый под в endpoints до `NotReady`; после — доли секунды;
+- при ожидании вытеснения (`evicted` ≈ +352 с) замены core/portal/registry/jobservice/nginx в `Pending` (`didn't match pod topology spread constraints`), trivy `Terminating` на мёртвой ноде;
 - после `docker start` нода `Ready` за секунды, Deployment'ы `2/2` примерно за минуту, распределение 1+1 (V11.1), trivy на своей ноде.
+
+**Полный отказ на ≈ 21 с в этом тесте** (`http 000 rc=35` за миллисекунды, все запросы падают) означает, что HAProxy Infra LB не имеет ни одного `UP`-бэкенда: проверка бэкенда делает HTTP-запрос через nginx к core. Проверка должна быть TCP + TLS-handshake (`check-ssl`), см. «Диагностику».
+
+Скрипт ждёт `2/2` у core, portal, registry и jobservice; nginx в этот список не входит — проверять V11.1 после теста.
 
 Что не проверяется: постоянная потеря ноды без возврата и потеря нод других ролей (pg, redis, consul, lb, s3): это H4.7.
 
@@ -609,7 +620,7 @@ docker pull core.harbor.domain/dockerhub-proxy/library/alpine:3.20
 hack/tests/h47-role-failure.sh consul     # нода лидера Consul
 hack/tests/h47-role-failure.sh redis      # нода master Redis
 hack/tests/h47-role-failure.sh pg         # нода лидера Patroni (primary PostgreSQL)
-hack/tests/h47-role-failure.sh lb         # нода, анонсирующая адрес Infra LB (владелец ARP 172.20.0.100)
+hack/tests/h47-role-failure.sh lb         # lb-нода, держащая VIP Keepalived 172.20.0.100
 # необязательно: HOLD=45 (сколько секунд держать ноду выключенной после переключения) WORKDIR=<каталог логов>
 ```
 
@@ -617,16 +628,16 @@ hack/tests/h47-role-failure.sh lb         # нода, анонсирующая �
 
 Скрипт сам определяет жертву, выводит хронологию (`node-down`, `node-notready`, `failover-done`, `node-up`, `node-ready`, `recovered`) и анализ: ошибки и окна недоступности по каждой нагрузке, потерянные подтверждённые записи, перезапуски подов. Если скрипт прерван, ноду нужно вернуть вручную: `docker start <нода>`, затем `kubectl get nodes`.
 
-Ожидается (результаты приёмки 2026-09-24):
+Ожидается (результаты приёмки 2026-09-25, по одному прогону):
 
 | Роль | Переключение | Ошибки клиентов | Потери подтверждённых записей |
 |------|--------------|-----------------|-------------------------------|
-| consul | новый лидер raft, Patroni не переключается | нет | 0 |
-| redis | Sentinel повышает реплику за ≈ 16 с, Redis недоступен ≈ 21 с | нет (зависания запросов Harbor до ≈ 21 с) | 0, ответы `INCR` не идут назад |
-| pg | Patroni повышает реплику, запись ≈ 33 с недоступна, старый primary возвращается репликой `streaming` | 5xx у запросов, которым нужна БД, окно ≈ 16 с; `docker pull` — нет | 0 в этом прогоне, репликация асинхронная (гарантии нет) |
-| lb | адрес Infra LB недоступен ≈ 36 с, затем ещё ≈ 8 с при возврате ноды | единичные ошибки через `curl` (14 из 306), `docker pull` — нет | 0 |
+| consul | новый лидер raft (`consul-2`), Patroni не переключается | нет (0 из 682 манифестов, 247 блобов, 513 pull, 43 push) | 0 |
+| redis | Sentinel повышает реплику (`redis-2`), Redis недоступен ≈ 21–25 с | манифесты, блобы, pull — 0 ошибок, зависания до ≈ 21 с; push 1 из 38 не прошёл | 0, ответы `INCR` не идут назад; core и jobservice **не** перезапускались |
+| pg | Patroni повышает реплику (`pg-1`), запись ≈ 33 с недоступна, старый primary возвращается репликой `streaming` | 5xx у запросов, которым нужна БД: манифесты 122 из 690, блобы 37 из 243, push 1 из 32; `docker pull` — 0 из 623 | 0 в этом прогоне, репликация асинхронная (гарантии нет) |
+| lb | VIP переходит на другую `lb`-ноду за секунды и **не возвращается** при возврате ноды (`nopreempt`) | манифесты 2 из 621 (в момент kill), самый долгий перерыв 5,2 с; `docker pull` 0 из 501, `push` 0 из 34; писатели через `harbor-lb`: PG 19 из 421, Redis 24 из 442 (новые соединения через мёртвый HAProxy Harbor LB) | 0 |
 
-Общие критерии: после возврата ноды роль здорова (Consul 3 сервера; Patroni лидер + реплика `streaming`; Redis 1 master + 2 replica и кворум Sentinel; ingress-nginx и HAProxy `2/2`), поды Harbor **не перезапускались** (в блоке `container restarts` только поды на убитой ноде: kindnet, kube-proxy, её собственные), `LOST acknowledged` = 0, `went BACKWARDS` = 0.
+Общие критерии: после возврата ноды роль здорова (Consul 3 сервера; Patroni лидер + реплика `streaming`; Redis 1 master + 2 replica и кворум Sentinel; `infra-lb` и `harbor-lb` `2/2`), поды Harbor **не перезапускались** (в блоке `container restarts` только поды на убитой ноде: kindnet, kube-proxy, её собственные), `LOST acknowledged` = 0, `went BACKWARDS` = 0.
 
 Если `went BACKWARDS` > 0 или `LOST acknowledged` > 0 — потеряны подтверждённые записи (для Redis это расщепление мозга: см. «Диагностику»). Если перезапустились core или jobservice — проверить пробы liveness (см. «Диагностику»).
 
@@ -641,20 +652,23 @@ hack/tests/h47-role-failure.sh lb         # нода, анонсирующая �
 | Симптом | Куда смотреть |
 |---------|---------------|
 | Под `Pending` | `kubectl describe pod`: чаще всего нет toleration/`nodeSelector` под таинт роли; либо `podAntiAffinity` не находит свободной ноды |
-| `ErrImagePull` / `ImagePullBackOff` при старте | временный сбой Docker Hub/quay.io — ждать ретрая; образ Patroni `harbor-ha/patroni:4.1.5-pg18.6` грузится только `make pg-image` (`imagePullPolicy: Never`), после пересоздания кластера нужен `make postgres` |
+| `ErrImagePull` / `ImagePullBackOff` при старте | временный сбой Docker Hub/quay.io — ждать ретрая; образы `harbor-ha/patroni:4.1.5-pg15.19` и `harbor-ha/keepalived:2.3.4-alpine3.24` грузятся только `make pg-image` / `make keepalived-image` (`imagePullPolicy: Never`), после пересоздания кластера нужны `make postgres` и `make infra-lb` |
 | Consul без лидера | `kubectl -n harbor-deps logs consul-0`; одинаковые имена нод (`-node=`), потерянные PVC; три отдельных кластера из одного узла (`consul members` на каждом поде показывает только себя): `-retry-join` не должен содержать собственное имя пода (так сделано в `consul.yaml`; ловушка проявляется, когда образ уже на ноде и все поды стартуют одновременно) |
 | Patroni не выбирает лидера | `patronictl ... list`, `logs pg-0`; доступность `consul.harbor-deps:8500`; пароли `pg-credentials` не совпадают с данными на PVC (Secret удалён, PVC остался) |
 | HAProxy: у PG/Redis нет `UP` | V5.2 и V6.1: primary/master есть? `logs deploy/harbor-lb`; после правки конфига HAProxy не перечитывает его сам — поднять аннотацию `config-version` в `hack/ha/haproxy.yaml` |
 | Sentinel: `flags s_down`/`o_down` | `logs redis-N -c sentinel`; резолвинг `redis-N.redis-headless.harbor-deps.svc.cluster.local` |
 | S3 `AccessDenied` у Harbor | ключ `harbor` не создан или не разрешён на бакет (V8.1); повторить `make s3` (идемпотентно); Secret `harbor-ha-s3` берёт ключи из `s3-credentials` только при первом создании |
 | Образ третьего реестра перестал тянуться при пересборке (`401 Unauthorized` на `HEAD .../manifests/sha256:...`) | реестр закрыл репозиторий (так случилось с `quay.io/minio/*`, D4a): закреплённый digest получить негде; нужен другой источник/версия или собственная сборка, решение фиксируется в `backlog.md` |
-| `172.20.0.100` не отвечает | `kubectl get endpoints ingress-nginx-controller` (нет Ready-подов — MetalLB не держит анонс), `kubectl logs -l app.kubernetes.io/component=speaker`, подсеть `kind` (V3.2) |
+| `172.20.0.100` не отвечает | кто держит VIP (V3.2), `kubectl -n harbor-deps logs <infra-lb-под> -c keepalived` (состояние VRRP, `chk_haproxy`), `ping 172.20.0.100`, подсеть `kind` (V3.2); если VIP есть, а `https` обрывается (`curl` код `35`) — у HAProxy нет `UP`-бэкендов (V3.4, `harbor-nginx-headless`, `kubectl get pods -l component=nginx`) |
+| `infra-lb` в `CrashLoopBackOff`: keepalived `Configuration file ... is not a regular non-executable file` | конфиг Keepalived из ConfigMap смонтирован исполняемым: права заданы по файлам (`mode: 0644` для `keepalived.conf`, `0755` для скрипта проверки), не через `defaultMode` |
+| `infra-lb`: HAProxy `backend ... has the same name as backend ...` | дубликат секции в `haproxy.cfg` (`hack/ha/infra-lb.yaml`); раскатка на первой ноде падает и останавливается (`maxUnavailable: 1`), вторая нода работает на старом конфиге; исправить конфиг и повторить `make infra-lb` |
+| При потере `app`-ноды все запросы падают сразу (`curl` код `35`), хотя один nginx жив | HAProxy Infra LB выключил оба nginx: проверка бэкенда должна быть TCP + TLS-handshake (`default-server check check-ssl`), не HTTP-запрос через nginx к core (тот зависает, пока в Service числится мёртвый под core); см. `hack/ha/infra-lb.yaml` и h44 в `backlog.md` |
 | `docker login` → 500, в логах core `unable to get PrivateKey from PEM type: PRIVATE KEY` | Secret `harbor-ha-token` создан с ключом PKCS#8. Удалить его и выполнить `make harbor-ha` (скрипт создаёт PKCS#1), затем `kubectl rollout restart deploy/harbor-core` |
 | Rolling update завис, новый под `Pending`, `didn't satisfy existing pods anti-affinity rules` | обязательный `podAntiAffinity` на двух нодах блокирует surge-под; использовать `topologySpreadConstraints` (как в `harbor-ha.yaml`) или `maxSurge: 0` (как у `harbor-lb`); уже застрявшие Deployment'ы — `scale 0` → `2` |
 | control-plane: `kube-controller-manager`/`kube-scheduler` в `CrashLoopBackOff`, поды не пересоздаются | лог `leaderelection lost`/`context deadline exceeded` — перегрузка общего диска (load average > 10, `iotop`); подождать спада нагрузки (компоненты поднимаются сами), не запускать тяжёлые push/сборки; тайминги leader-election заданы в `kind-cluster.yaml` (lease 60 s) |
 | Sentinel часто переключает master, в логах Valkey `AOF fsync is taking too long` | перегрузка диска; `down-after-milliseconds` = 15000 (`SENTINEL SET mymaster down-after-milliseconds 15000` на всех трёх Sentinel); HAProxy сам находит нового master, смотреть V6.1/V7.2 |
 | После очистки пропал `hello:1.0` | артефакт удалён вместе с чужим тегом на том же digest; `make deploy-app` (тот же digest); удалять тестовые артефакты по digest, не по тегу |
-| При rolling update клиенты получают 502, в логах core `proxy error: dial tcp <ClusterIP registry>:5000: connect: connection refused` | под останавливается раньше, чем маршрутизация убрала его; проверить `preStop` у core/registry/portal (`kubectl get deploy harbor-registry -o jsonpath='{.spec.template.spec.containers[*].lifecycle}'`); `preStop` добавляет `hack/helm-postrender.py` при `make harbor-ha` (нужен PyYAML) |
+| При rolling update клиенты получают 502, в логах core `proxy error: dial tcp <ClusterIP registry>:5000: connect: connection refused` | под останавливается раньше, чем маршрутизация убрала его; проверить `preStop` у core/registry/portal (`kubectl get deploy harbor-registry -o jsonpath='{.spec.template.spec.containers[*].lifecycle}'`); `preStop` добавляет `hack/helm-postrender.py` при `make harbor-ha` (нужен PyYAML; также core/registry/portal/nginx) |
 | После потери ноды поды Harbor остались `Pending` (`didn't match pod topology spread constraints`) | так и должно быть, пока жива одна `app`-нода: `maxSkew: 1` не пускает вторую реплику на ту же ноду; сервис работает на одной реплике, после возврата ноды Deployment'ы возвращаются к `2/2` сами (≈ 1 мин); `harbor-trivy-0` ждёт свою ноду (PVC привязан к ней) |
 | Новые pod-ы приложения в `ErrImagePull`: `x509: certificate signed by unknown authority` при pull с `core.harbor.domain` | containerd ноды не доверяет текущему CA Harbor. С `harbor-ha-ingress-tls` CA стабилен и не меняется при `helm upgrade`; если ошибка есть, сравнить серийники: `curl -sk https://core.harbor.domain/api/v2.0/systeminfo/getcert \| openssl x509 -noout -serial` и `docker exec harbor-control-plane openssl x509 -in /usr/local/share/ca-certificates/harbor-ca.crt -noout -serial`; при различии `make deploy-app` (переустанавливает доверие) |
 | Proxy-cache: pull по тегу не работает при недоступном апстриме (`artifact …:tag not found`) | так устроен Harbor: кэшируется манифест платформы по digest, тег резолвит апстрим; тянуть по digest (`repo@sha256:…`), digest платформы виден в `GET /projects/<проект>/repositories/<репо>/artifacts` |
@@ -662,15 +676,17 @@ hack/tests/h47-role-failure.sh lb         # нода, анонсирующая �
 | Создание endpoint Docker Hub: ошибка при `POST /registries` | Harbor пингует `hub.docker.com`; проверить доступ из пода core (`curl https://hub.docker.com`, `https://registry-1.docker.io/v2/` → 401); после снятия блокировки DNS перезапустить CoreDNS (`kubectl -n kube-system rollout restart deploy/coredns`) |
 | HAProxy: у Redis нет `UP` при живом master | проверка требует `role:master` **и** подключённую реплику (`connected_slaves` ≥ 1): свежеповышенный master несколько секунд без реплик недоступен; `kubectl -n harbor-deps exec redis-N -c valkey -- valkey-cli info replication`; если реплик нет — смотреть `master_link_status` у реплик и логи Sentinel |
 | Записи Redis подтверждаются, но значения `INCR` «идут назад» | два master одновременно (устаревший master вернулся после отказа ноды); должны предотвращать `start-valkey.sh` (ожидание peers), `min-replicas-to-write 1` и проверка HAProxy; смотреть `+convert-to-slave` в логах Sentinel и строку `starting valkey as ...` в логе Valkey |
-| Поды Harbor перезапускаются при переключении Redis (`Container core failed liveness probe`) | пробы core/jobservice зависают, пока Redis недоступен; в `harbor-ha.yaml` liveness этих подов терпит ≈ 60 с (`timeoutSeconds: 5`, `failureThreshold: 6`); проверить `kubectl get deploy harbor-core -o jsonpath='{.spec.template.spec.containers[0].livenessProbe}'` |
-| Адрес Infra LB (`172.20.0.100`) недоступен после потери lb-ноды | MetalLB L2 переносит анонс на другую ноду ≈ 30–40 с; проверить `ip neigh show 172.20.0.100` (MAC совпадает с живой lb-нодой?), `kubectl logs -l app.kubernetes.io/component=speaker` |
+| Поды Harbor перезапускаются при переключении Redis (`Container core failed liveness probe`) | пробы core/jobservice зависают, пока Redis недоступен; в chart 1.18.3 их нельзя задать значениями, поэтому `hack/helm-postrender.py` делает liveness этих подов терпимой ≈ 60 с (`timeoutSeconds: 5`, `failureThreshold: 6`); проверить `kubectl get deploy harbor-core -o jsonpath='{.spec.template.spec.containers[0].livenessProbe}'` |
+| Адрес Infra LB (`172.20.0.100`) недоступен после потери lb-ноды | Keepalived переносит VIP на другую ноду за секунды (в приёмке — самый долгий перерыв 5,2 с); проверить, что второй `infra-lb` жив и на его ноде VIP есть (V3.2), `ip neigh show 172.20.0.100` (MAC совпадает с живой lb-нодой?), логи keepalived |
+| Harbor: `helm upgrade` падает `yaml: ... found character '\t'` в post-renderer | шаблон `trivy-sts.yaml` chart 1.18.3 содержит TAB, PyYAML его не принимает; `hack/helm-postrender.py` убирает хвостовые пробелы и табы до разбора — если ошибка вернулась, проверить, что эта строка на месте |
 | Сбросить один компонент | удалить его Secret **и** PVC (`data-<имя>-N`), затем `make <таргет>`; удалять только Secret нельзя: новый пароль не совпадёт с данными |
-| Всё сломалось | `make cluster-delete && make cluster && make infra-lb && make ha-deps` (около 11 минут) |
+| Всё сломалось | `make cluster-delete && make cluster && make ha-deps && make infra-lb && make harbor-ha && make deploy-app` (около 10 минут с кэшем образов: `make images-load` до и после `make cluster`) |
 
 ## Что ранбук не проверяет
 
-- Отказы и переключения (Patroni failover, Sentinel failover, потеря одного HAProxy, потеря ноды): Phase 4 (H4.x) в `backlog.md`, засчитываются только после приёмки вехи 1 (H3.5).
-- Производительность и нагрузка.
+- Разрушающие сценарии (Patroni failover, Sentinel failover, потеря `app`-ноды или ноды роли): скрипты `hack/tests/` (раздел 13), результаты — `backlog.md`, P5.
+- Потерю `s3`-ноды (одна нода без резервирования), постоянную потерю ноды без возврата, `synchronous_mode` в проде.
+- Производительность и нагрузку.
 
 ## Ansible-версия (`make verify`)
 
@@ -685,14 +701,14 @@ make verify EXTRA='-e verify_rollout=true'          # плюс V11.6 (rolling re
 make verify EXTRA='-e verify_writes=false'          # без проверок с записью (V5.4, V6.3, V8.2, V9)
 ```
 
-Устройство: `ansible/group_vars/all.yml` — единственное место чисел и адресов (число нод по ролям, `lb_ip`, namespace, закреплённые образы для V9); роль на раздел (`roles/verify_cluster` = V1, `verify_pods` = V2, `verify_infra_lb` = V3, `verify_consul` = V4, `verify_postgres` = V5, `verify_redis` = V6, `verify_haproxy` = V7, `verify_s3` = V8, `verify_reach` = V9, `verify_host` = V10, `verify_harbor` = V11, `verify_load` = V12); теги плея `V1`..`V12`. Модули: `kubernetes.core.k8s_info` (ноды, поды, сервисы, Secret, MetalLB), `k8s_exec` (consul, patronictl, valkey-cli, garage, HAProxy stats), `k8s` + `k8s_log` (Job для V9), `uri` (V3.3, V11.2, V11.3), `command` (docker, aws через `files/s3-access.sh`, `kubectl logs` для V12).
+Устройство: `ansible/group_vars/all.yml` — единственное место чисел и адресов (число нод по ролям, `lb_ip`, namespace, закреплённые образы для V9); роль на раздел (`roles/verify_cluster` = V1, `verify_pods` = V2, `verify_infra_lb` = V3, `verify_consul` = V4, `verify_postgres` = V5, `verify_redis` = V6, `verify_haproxy` = V7, `verify_s3` = V8, `verify_reach` = V9, `verify_host` = V10, `verify_harbor` = V11, `verify_load` = V12); теги плея `V1`..`V12`. Модули: `kubernetes.core.k8s_info` (ноды, поды, сервисы, Secret), `k8s_exec` (consul, patronictl, valkey-cli, garage, HAProxy stats), `k8s` + `k8s_log` (Job для V9), `uri` (V3.3, V11.2, V11.3), `command` (docker: VIP и статистика HAProxy Infra LB в V3, NodePort demo в V11.3; aws через `files/s3-access.sh`; `kubectl logs` для V12).
 
 Отличия от ручного ранбука:
 
 - V2.2 (рестарты) и V12.3 (соединения от обоих HAProxy) дают `WARN`, а не `FAIL`: рестарты остаются после тестов отказов (это история, не текущий сбой), а число адресов клиентов на primary зависит от того, сколько соединений открыто в данный момент. `INFO` (V2.3, V8.3, V10.1, V11.6 без флага) — только сведения.
 - V9 запускает Job на `app`-ноде (три контейнера-клиента); пароли копируются во временный Secret `verify-v9` в `default` (`no_log`) и удаляются в конце вместе с Job.
 - V8.2 требует `aws` CLI на хосте и использует изолированную конфигурацию (не читает `~/.aws`); при `verify_writes=false` не выполняется.
-- V11.3 проверяет демо-приложение; push/pull образов и OCI-чарта покрывает `hack/tests/h41-push-pull.sh`, а не плейбук. V12 не включает pull через registry (это тоже h41, где считаются запросы обеих реплик registry).
+- V11.3 проверяет демо-приложение по NodePort на control-plane; push/pull образов и OCI-чарта покрывает `hack/tests/h41-push-pull.sh`, а не плейбук. V12 считает запросы по подам nginx и registry при параллельной нагрузке; распределение core/portal за Service не наблюдается (D15).
 - Поды в состоянии `Terminating` не считаются (проверка в момент rollout не даёт ложного отказа).
 - Пароли не попадают в вывод: задачи с ними `no_log: true`, а роль читает их из Secret'ов кластера.
 

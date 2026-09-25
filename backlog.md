@@ -1,6 +1,6 @@
 # Backlog: Harbor active-active на KinD — прод-зеркало (форк)
 
-**Статус (2026-09-25): P0–P5 и P3a выполнены (стенд собран с нуля, `make verify` 38 PASS / 0 FAIL, тесты отказов h41–h47 пройдены); открыт P6 (документация: `docs/stand-topology.md`, `docs/verification-runbook.md`).**
+**Статус (2026-09-25): P0–P6 выполнены (стенд собран с нуля, `make verify` 38 PASS / 0 FAIL, тесты отказов h41–h47 пройдены, документация переписана); план форка закрыт. Открытые вопросы — в конце раздела «Риски и заметки» и в P5 («Что осталось непроверенным»).**
 
 Форк `harbor-active-active-on-kind` @ `7279079` (сам — форк `harbor-on-kind` @ `b65df71`); полная история, включая подробный backlog родителя (Phase 0–6, пункты H0.1–H6.2), — в git: `git show 7279079:backlog.md`. Здесь — только то, что относится к этому репозиторию.
 
@@ -106,7 +106,7 @@
   - **Итоговый `make verify` после всех тестов:** 37 PASS, 0 FAIL, WARN — рестарты контейнеров, вызванные самими тестами, и V12.3 (в покое соединения БД бывают только с одного из двух HAProxy). **Не запускалось:** `h62-sync-mode.sh` (необязательный; `synchronous_mode` в стенде выключен, D8).
   - **Что осталось непроверенным:** поведение при постоянной потере ноды без возврата, потеря `s3`-ноды (одна нода без резервирования, D1), `synchronous_mode`.
 
-- [ ] **P6** Документация: `docs/stand-topology.md`, `docs/verification-runbook.md`, финальная сверка `backlog.md`.
+- [x] **P6** Документация (2026-09-25): `docs/stand-topology.md` переписан под новую схему (VIP Keepalived + HAProxy Infra LB, nginx Harbor как вход, PostgreSQL 15, NodePort demo, локально собираемые образы; снимок нод и IP с живого стенда после P5); `docs/verification-runbook.md` обновлён: раздел 3 (Infra LB: V3.1–V3.4), V11 (nginx, версия Harbor, NodePort), раздел 12 (распределение по подам nginx и registry при параллельной нагрузке), ожидаемые результаты P4.2–P4.7 (измерения P5), диагностика (Keepalived, HAProxy Infra LB, проверка бэкенда TCP + TLS, post-renderer), удалены все упоминания MetalLB, ingress-nginx, `172.20.0.101`, PostgreSQL 18. Новые команды ранбука выполнены на стенде: V3.1–V3.4, V11.1–V11.3, V12 дают ожидаемые значения. Финальная сверка `backlog.md`: статус и критерии обновлены.
 
 - **P5 — что входит.** Собрать стенд с нуля (`make cluster` → `make ha-deps` → `make infra-lb` → `make add-host` → `make harbor-ha` → `make deploy-app`), `make verify` (V3/V11/V12 переписаны в P2 и ни разу не запускались), затем `hack/tests/` по одному на здоровом стенде. Заранее известные непроверенные допущения: HAProxy → nginx (TLS-проверка бэкендов, `server-template` по headless Service, `hostNetwork` + `ClusterFirstWithHostNet`), достижимость VIP с хоста на kind-нодах, `GET /v2/` с basic-auth доходит до registry (V12.2), миграции Harbor 2.14.3 на PostgreSQL 15, поведение проб при отказе Redis, pg_hba `10.244.0.0/16` на реальной pod-сети.
 
