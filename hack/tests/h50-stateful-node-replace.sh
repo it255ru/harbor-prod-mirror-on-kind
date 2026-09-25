@@ -12,8 +12,9 @@
 #   2. `docker kill`s the victim (never started again), waits for NotReady, `kubectl delete node`, removes the container;
 #   3. builds a replacement node with the same name and role (hack/tests/lib-node.sh), loads the images of the role
 #      (the locally built Patroni image needs `kind load`, it is not in the cache), and waits for the role to heal BY ITSELF;
-#   4. if it does not, applies the documented repair: pg / redis / consul - delete the PVC and the pod of the member (the volume
-#      directory of the replacement node is created by root, the database processes get `Permission denied` on it); s3 - `make s3`
+#   4. if it does not, applies the fallback repair: pg / redis / consul - delete the PVC and the pod of the member (before the init
+#      container `fix-perms` of the pg and redis StatefulSets the root-owned volume directory of the replacement node gave the database
+#      processes `Permission denied`; now they heal by themselves); s3 - `make s3`
 #      re-creates the layout, bucket and key, then the stale Harbor data is cleaned and the demo image is pushed again;
 #   5. checks that the marker data is still there and prints how long each step took.
 set -uo pipefail
