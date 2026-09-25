@@ -1,17 +1,20 @@
-# Harbor in active-active mode (backlog H3.1). Chart 1.19.2 keys verified against
-# `helm show values harbor/harbor --version 1.19.2`.
+# Harbor 2.14.3 in active-active mode (backlog H3.1, P3). Chart 1.18.3 keys verified against
+# `helm show values harbor/harbor --version 1.18.3` and its templates. NOT settable in 1.18.3 and therefore done by
+# hack/helm-postrender.py: podDisruptionBudget of every component, core/jobservice liveness/readiness probes.
 # All secrets live in Secrets harbor-ha-secrets / harbor-ha-s3 / harbor-ha-token (created by hack/install-harbor-ha.sh).
 #
 # Placement: every Harbor component runs on the `app` nodes, replicas on different nodes
-# (YAML anchors &appNode / &appToleration are expanded by Helm's YAML parser).
+# (YAML anchors &appNode / &appToleration, defined at `nginx`, are expanded by Helm's YAML parser).
 externalURL: https://core.harbor.domain
 
 # CA served at /api/v2.0/systeminfo/getcert and used by `make deploy-app` to trust the registry
 # (Secret key ca.crt; needed because the certificate is not auto-generated)
 caSecretName: harbor-ha-ingress-tls
 
+# No ingress controller (D11/D15): the chart's own nginx proxy (ClusterIP Service `harbor`, 2 replicas on the app nodes) is
+# the entry point; the Infra LB (hack/ha/infra-lb.yaml: Keepalived VIP + HAProxy, TCP passthrough) sends the traffic to it.
 expose:
-  type: ingress
+  type: clusterIP
   tls:
     enabled: true
     # `auto` would regenerate the CA on every helm upgrade and break the nodes' trust in the registry;
@@ -19,10 +22,6 @@ expose:
     certSource: secret
     secret:
       secretName: harbor-ha-ingress-tls
-  ingress:
-    hosts:
-      core: core.harbor.domain
-    className: nginx
 
 # Registry blobs go to the S3 stand-in (Garage) and job logs to the database, so no shared RWX volume is needed;
 # the only PVC left is Trivy's cache (StatefulSet volumeClaimTemplate, ReadWriteOnce per replica).
@@ -66,17 +65,30 @@ redis:
 existingSecretSecretKey: harbor-ha-secrets   # key secretKey
 
 nginx:
-  replicas: 1   # not deployed with expose.type=ingress
-
-portal:
+  image:
+    repository: goharbor/nginx-photon
+    tag: v2.14.3@sha256:e31b5290e31938fde76590e4f5d7b8eb3d8038ad1485879bdad7a480538dc858   # digest of the pin in backlog.md
   replicas: 2
   nodeSelector: &appNode
     harbor-ha/role: app
   tolerations: &appToleration
     - {key: harbor-ha/role, operator: Equal, value: app, effect: NoSchedule}
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
+  # same reasoning as for core below: spread per revision, no required podAntiAffinity
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys: [pod-template-hash]
+      labelSelector:
+        matchLabels: {app: harbor, component: nginx}
+
+portal:
+  image:
+    repository: goharbor/harbor-portal
+    tag: v2.14.3@sha256:2556b6c7dd832bf22ed8b177245fa5fbcd70255959e69c5d0fbe2153f4bd2243   # digest of the pin in backlog.md
+  replicas: 2
+  nodeSelector: *appNode
+  tolerations: *appToleration
   # spread over the app nodes; unlike a required podAntiAffinity this does not deadlock rolling
   # updates (the surge pod needs a third node there, maxUnavailable rounds down to 0 for 2 replicas).
   # matchLabelKeys is required: without it old and new pods are counted together and a rollout can
@@ -90,12 +102,12 @@ portal:
         matchLabels: {app: harbor, component: portal}
 
 core:
+  image:
+    repository: goharbor/harbor-core
+    tag: v2.14.3@sha256:a30e5a8be3d94b6485e7fdd4ed7fdf9e9724ee0a6d103b3804aacf6784ee358e   # digest of the pin in backlog.md
   replicas: 2
   nodeSelector: *appNode
   tolerations: *appToleration
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
   # spread over the app nodes; unlike a required podAntiAffinity this does not deadlock rolling
   # updates (the surge pod needs a third node there, maxUnavailable rounds down to 0 for 2 replicas).
   # matchLabelKeys is required: without it old and new pods are counted together and a rollout can
@@ -107,27 +119,17 @@ core:
       matchLabelKeys: [pod-template-hash]   # spread every revision on its own, so a rollout ends 1+1 again
       labelSelector:
         matchLabels: {app: harbor, component: core}
-  # core's /api/v2.0/ping hangs while Redis is unreachable (a Sentinel failover takes ~20-30 s). With the chart
-  # default (timeout 1 s, 2 failures) kubelet KILLED both core containers during a Redis failover and Harbor was
-  # down (503) until they were back (H4.7). Liveness now tolerates ~60 s; readiness stays fast so a core without
-  # Redis just leaves the load balancing instead of being restarted.
-  livenessProbe:
-    initialDelaySeconds: 0
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 6
-    successThreshold: 1
   existingSecret: harbor-ha-secrets       # key secret
   existingXsrfSecret: harbor-ha-secrets   # key CSRF_KEY
   secretName: harbor-ha-token             # TLS secret with the token signing key/cert (stable across upgrades)
 
 jobservice:
+  image:
+    repository: goharbor/harbor-jobservice
+    tag: v2.14.3@sha256:e2b0298e894d725d68954b786c61c5dd607114f6129534756c8f7985124c07a6   # digest of the pin in backlog.md
   replicas: 2
   nodeSelector: *appNode
   tolerations: *appToleration
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
   # spread over the app nodes; unlike a required podAntiAffinity this does not deadlock rolling
   # updates (the surge pod needs a third node there, maxUnavailable rounds down to 0 for 2 replicas).
   # matchLabelKeys is required: without it old and new pods are counted together and a rollout can
@@ -139,24 +141,22 @@ jobservice:
       matchLabelKeys: [pod-template-hash]   # spread every revision on its own, so a rollout ends 1+1 again
       labelSelector:
         matchLabels: {app: harbor, component: jobservice}
-  # same reason as core: the job queue lives in Redis and /api/v1/stats hangs during a Redis failover
-  livenessProbe:
-    initialDelaySeconds: 300
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 6
-    successThreshold: 1
   jobLoggers:
     - database          # `file` would need one ReadWriteMany volume shared by all replicas
   existingSecret: harbor-ha-secrets       # key JOBSERVICE_SECRET
 
 registry:
+  registry:
+    image:
+      repository: goharbor/registry-photon
+      tag: v2.14.3@sha256:6533fc396cbce57131053faec55e1bd1da8b92aed318410c203ff1c7a9b910ab
+  controller:
+    image:
+      repository: goharbor/harbor-registryctl
+      tag: v2.14.3@sha256:ddf6bb429eb6b5a3db3e98bfe6ab3dd2567ebb35547836d87fc54ddacebfac8d
   replicas: 2
   nodeSelector: *appNode
   tolerations: *appToleration
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
   # spread over the app nodes; unlike a required podAntiAffinity this does not deadlock rolling
   # updates (the surge pod needs a third node there, maxUnavailable rounds down to 0 for 2 replicas).
   # matchLabelKeys is required: without it old and new pods are counted together and a rollout can
@@ -172,6 +172,9 @@ registry:
 
 # Trivy replication is decided in H3.2; one replica for now. Runs on the app nodes as well.
 trivy:
+  image:
+    repository: goharbor/trivy-adapter-photon
+    tag: v2.14.3@sha256:5c6f7162804cd94d41672a694579f136ccc9730d024dda9ad24e0f42bdae6f36   # digest of the pin in backlog.md
   enabled: true
   replicas: 1
   nodeSelector: *appNode
