@@ -79,7 +79,7 @@ failover_done() {
 healthy() {  # the role is fully back
   case "$ROLE" in
     lb)     [ "$(kubectl -n $NS get ds infra-lb --no-headers | awk '{print $4}')" = "2" ] && [ "$(kubectl -n $NS get deploy harbor-lb --no-headers | awk '{print $2}')" = "2/2" ] ;;
-    pg)     kubectl -n $NS exec "$SURV_PG" -- patronictl -c /etc/patroni/patroni.yml list -f json 2>/dev/null | python3 -c "import sys,json; m=json.load(sys.stdin); sys.exit(0 if len(m)==2 and sorted(x['Role'] for x in m)==['Leader','Replica'] and all(x['State'] in ('running','streaming') for x in m) else 1)" ;;
+    pg)     kubectl -n $NS exec "$SURV_PG" -- patronictl -c /etc/patroni/patroni.yml list -f json 2>/dev/null | python3 -c "import sys,json; m=json.load(sys.stdin); sys.exit(0 if len(m)==2 and sorted(('Replica' if x['Role']=='Sync Standby' else x['Role']) for x in m)==['Leader','Replica'] and all(x['State'] in ('running','streaming') for x in m) else 1)" ;;
     redis)  [ "$(for i in 0 1 2; do kubectl -n $NS exec redis-$i -c valkey -- valkey-cli role 2>/dev/null | head -1; done | sort | paste -sd' ')" = "master slave slave" ] && kubectl -n $NS exec "$SURV_REDIS" -c sentinel -- valkey-cli -p 26379 sentinel ckquorum mymaster 2>/dev/null | grep -q "^OK 3" ;;
     consul) [ "$(kubectl -n $NS exec "$SURV_CONSUL" -- consul operator raft list-peers 2>/dev/null | awk 'NR>1' | wc -l)" = 3 ] ;;
     s3)     [ "$(kubectl -n $NS get pod garage-0 -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)" = true ] && [ "$(curl -sk -u "$AUTH" -o /dev/null -w '%{http_code}' -m 10 "https://$HOST/v2/python/hello/manifests/1.0" -H 'Accept: application/vnd.docker.distribution.manifest.v2+json')" = 200 ] ;;

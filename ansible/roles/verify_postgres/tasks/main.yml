@@ -78,7 +78,7 @@
   vars:
     members: "{{ v5.results[0].stdout | default('[]') | from_json }}"
     leaders: "{{ members | selectattr('Role', 'eq', 'Leader') | selectattr('State', 'eq', 'running') | list }}"
-    replicas: "{{ members | selectattr('Role', 'eq', 'Replica') | selectattr('State', 'eq', 'streaming') | list }}"
+    replicas: "{{ members | selectattr('Role', 'in', ['Replica', 'Sync Standby']) | selectattr('State', 'eq', 'streaming') | list }}"
     lag: "{{ replicas | map(attribute='Replay Lag', default=0) | list }}"
     codes: "{{ v5.results[1:] | map(attribute='stdout', default='') | list }}"
     # order of the loop: pg-0/primary, pg-1/primary, pg-1/replica, pg-0/replica
@@ -86,7 +86,7 @@
   ansible.builtin.set_fact:
     verify_results: >-
       {{ verify_results + [
-        {'id': 'V5.1', 't': 'Patroni: one running Leader, one streaming Replica, lag 0',
+        {'id': 'V5.1', 't': 'Patroni: one running Leader, one streaming Replica (or Sync Standby with synchronous_mode), lag 0',
          's': 'PASS' if (leaders | length == 1 and replicas | length == 1 and lag | select('ne', 0) | list | length == 0) else 'FAIL',
          'd': members | map(attribute='Member') | zip(members | map(attribute='Role'), members | map(attribute='State')) | map('join', ':') | join(' ')},
         {'id': 'V5.2', 't': 'Patroni REST: /primary 200 on the leader only, /replica 200 on the replica only',
