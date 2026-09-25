@@ -72,7 +72,7 @@ make cluster-delete
 
 `make install` runs `infra-lb` and `harbor-ha`. Every target is idempotent. The order of `ha-deps` matters (Patroni needs Consul, HAProxy needs the PostgreSQL and Redis backends). `make help` lists all targets; variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOCALBIN`, `PG_IMAGE`.
 
-Measured from scratch with the image cache (2026-09-25): `cluster` 52 s, `images-load` into the nodes about 2 min, `ha-deps` about 3 min, `infra-lb` seconds, `harbor-ha` seconds plus about 30 s for the pods, `deploy-app` 10 s, `make verify` about 1 min. Without the cache the times are dominated by image pulls (Docker Hub on this host is slow).
+Measured from scratch with the image cache (2026-09-26, the whole chain without manual steps: 490 s): `cluster` 52 s, `images-load` into the nodes about 2 min, `ha-deps` about 3 min, `infra-lb` seconds, `harbor-ha` seconds plus about 30 s for the pods, `deploy-app` 8 s, `make verify` about 1 min. Without the cache the times are dominated by image pulls (Docker Hub on this host is slow).
 
 Harbor UI: https://core.harbor.domain (`admin` / `Harbor12345`, the lab default). Passwords of the dependencies are generated on the first run of each target and live only in Secrets: `pg-credentials`, `redis-credentials`, `s3-credentials` (namespace `harbor-deps`) and `harbor-ha-secrets`, `harbor-ha-s3`, `harbor-ha-token`, `harbor-ha-ingress-tls` (namespace `default`). Read one with `kubectl -n harbor-deps get secret pg-credentials -o jsonpath='{.data.harbor}' | base64 -d`. To reset a component delete its Secret and its PVCs (`data-<name>-N`) together; the state on the volume keeps the old password.
 
