@@ -43,7 +43,7 @@ LIVENESS = {"harbor-core": {"timeoutSeconds": 5, "failureThreshold": 6},
 # time (h44). Every app node runs one replica of each component, so prefer the endpoint on the caller's own node: a surviving
 # node then never talks to the dead one. PreferSameNode is only a preference: without a local endpoint (a pod restarting on
 # this node) traffic goes to the other node as before. Chart 1.18.3 has no value for it.
-SAME_NODE = {"harbor-core", "harbor-portal", "harbor-registry", "harbor-jobservice"}
+SAME_NODE = {"harbor-core", "harbor-portal", "harbor-registry", "harbor-jobservice", "harbor-trivy"}
 extra = []
 for d in docs:
     if d.get("kind") == "Deployment" and d["metadata"]["name"] in TARGETS:
@@ -55,6 +55,11 @@ for d in docs:
         for c in d["spec"]["template"]["spec"]["containers"]:
             if "livenessProbe" in c:
                 c["livenessProbe"].update(LIVENESS[d["metadata"]["name"]])
+    if d.get("kind") == "StatefulSet" and d["metadata"]["name"] == "harbor-trivy":
+        extra.append({"apiVersion": "policy/v1", "kind": "PodDisruptionBudget",
+                      "metadata": {"name": "harbor-trivy", "namespace": d["metadata"].get("namespace", "default"),
+                                   "labels": d["metadata"].get("labels", {})},
+                      "spec": {"minAvailable": 1, "selector": {"matchLabels": {"app": "harbor", "component": "trivy"}}}})
     if d.get("kind") == "Deployment" and d["metadata"]["name"] in PDB_COMPONENTS:
         extra.append({"apiVersion": "policy/v1", "kind": "PodDisruptionBudget",
                       "metadata": {"name": d["metadata"]["name"], "namespace": d["metadata"].get("namespace", "default"),

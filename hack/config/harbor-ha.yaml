@@ -170,12 +170,21 @@ registry:
         matchLabels: {app: harbor, component: registry}
   existingSecret: harbor-ha-secrets       # key REGISTRY_HTTP_SECRET
 
-# Trivy replication is decided in H3.2; one replica for now. Runs on the app nodes as well.
+# Trivy: two replicas, one per app node, so a lost app node does not take the scanner down (H3.2 revisited). Each replica is a
+# StatefulSet pod with its own node-local PVC and downloads its own vulnerability databases (~1.3 GB); scan jobs and results are in
+# Redis, and the Service harbor-trivy balances over both.
 trivy:
   image:
     repository: goharbor/trivy-adapter-photon
     tag: v2.14.3@sha256:5c6f7162804cd94d41672a694579f136ccc9730d024dda9ad24e0f42bdae6f36   # digest of the pin in backlog.md
   enabled: true
-  replicas: 1
+  replicas: 2
   nodeSelector: *appNode
   tolerations: *appToleration
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      matchLabelKeys: [controller-revision-hash]   # a StatefulSet has no pod-template-hash
+      labelSelector:
+        matchLabels: {app: harbor, component: trivy}

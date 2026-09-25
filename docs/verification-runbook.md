@@ -378,7 +378,7 @@ curl -s http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddr
 **V11.4 Блобы лежат в S3 (Garage), а не в томе**
 
 ```bash
-kubectl get pvc --no-headers | awk '{print $1}'                                          # Ожидается: только data-harbor-trivy-0
+kubectl get pvc --no-headers | awk '{print $1}'                                          # Ожидается: data-harbor-trivy-0 и data-harbor-trivy-1
 kubectl -n harbor-deps exec garage-0 -- /garage bucket info registry-blobs 2>/dev/null | grep -E '^(Size|Objects)'   # после push число объектов и размер растут
 ```
 
@@ -538,7 +538,7 @@ hack/tests/h43-rolling-update.sh registry     # только registry
 Разрушающая проверка: контейнер `app`-ноды убивается без корректной остановки (`docker kill`) и в конце запускается обратно. При сбое скрипта ноду нужно вернуть вручную: `docker start harbor-worker2` (или `harbor-worker`).
 
 ```bash
-hack/tests/h44-node-loss.sh harbor-worker2               # нода с trivy; ждёт вытеснения подов (~7 мин)
+hack/tests/h44-node-loss.sh harbor-worker2               # нода с trivy-1; ждёт вытеснения подов (~7 мин)
 EVICT_WAIT=0 hack/tests/h44-node-loss.sh harbor-worker   # без ожидания вытеснения (~3,5 мин)
 ```
 
@@ -550,7 +550,7 @@ EVICT_WAIT=0 hack/tests/h44-node-loss.sh harbor-worker   # без ожидани
 - зависаний нет: самый медленный запрос 2,1 с, манифесты 1 из 2208, блобы 1 из 784, `docker pull` 1 из 1311 (тот, что шёл в момент `docker kill`); единичная ошибка — соединение к мёртвому nginx до срабатывания проверки HAProxy (≈ 2–3 с);
 - это обеспечивает `trafficDistribution: PreferSameNode` на Service core, portal, registry, jobservice (D17): живая нода ходит к своим локальным репликам. Без него (прогоны до D17) до NotReady часть запросов висела до 30 с — nginx и core обращались через ClusterIP и попадали на мёртвый под;
 - при ожидании вытеснения (`evicted` ≈ +348 с) замены core/portal/registry/jobservice/nginx в `Pending` (`didn't match pod topology spread constraints`), trivy `Terminating` на мёртвой ноде;
-- после `docker start` нода `Ready` за секунды, Deployment'ы `2/2` примерно за минуту, распределение 1+1 (V11.1), trivy на своей ноде.
+- после `docker start` нода `Ready` за секунды, Deployment'ы `2/2` примерно за минуту, распределение 1+1 (V11.1), реплика trivy на своей ноде; пока нода мертва, сканирование работает на второй реплике (P4.9).
 
 Если зависания до 30 с вернулись — проверить `kubectl get svc harbor-core harbor-registry -o custom-columns=N:.metadata.name,TD:.spec.trafficDistribution` (ожидается `PreferSameNode`; поле ставит `hack/helm-postrender.py`, потерять его может установка без post-renderer) и `hints.forNodes` в EndpointSlice.
 
@@ -650,7 +650,7 @@ hack/tests/h47-role-failure.sh s3         # нода Garage (единствен�
 Разрушающая проверка: `app`-нода убивается **без возврата**, затем заменяется новой. `kind` не умеет добавлять ноду в работающий кластер, поэтому скрипт `hack/tests/h48-node-replace.sh` собирает её вручную. Как и остальные, запускать на здоровом стенде (`kubectl get deploy`: `2/2`, `loadavg` < 3).
 
 ```bash
-hack/tests/h48-node-replace.sh                  # harbor-worker2 (нода с Trivy и его PVC); около 6 минут
+hack/tests/h48-node-replace.sh                  # harbor-worker2 (нода с `harbor-trivy-1` и его PVC); около 6 минут
 hack/tests/h48-node-replace.sh harbor-worker    # другая app-нода
 ```
 
@@ -661,12 +661,25 @@ hack/tests/h48-node-replace.sh harbor-worker    # другая app-нода
 - NotReady ≈ 50 с; манифесты 0 из 1353, блобы 1 из 501, `docker pull` 1 из 719 (тот, что шёл в момент `docker kill`), самый медленный запрос ≈ 3 с;
 - новая нода `Ready` через ≈ 20 с после `kubeadm join`, метка `harbor-ha/role=app` и таинт на месте (V1.2, V1.3);
 - все Deployment'ы Harbor `2/2` через ≈ 230 с после потери (через ≈ 26 с после загрузки образов);
-- Trivy: под уходит в `CrashLoopBackOff` (том `local-path` привязан к ноде, на новой каталог пуст); скрипт удаляет PVC и под (`kubectl delete pvc data-harbor-trivy-0; kubectl delete pod harbor-trivy-0`), Trivy заново скачивает базу и поднимается;
+- Trivy: реплика с этой ноды уходит в `CrashLoopBackOff` (том `local-path` привязан к ноде, на новой каталог пуст); скрипт удаляет её PVC и под (`kubectl delete pvc data-harbor-trivy-<N>; kubectl delete pod harbor-trivy-<N>`), Trivy заново скачивает базу и поднимается; вторая реплика всё время работает;
 - после замены `make verify` — без `FAIL`.
 
 Нода с тем же именем «подхватывает» поды, привязанные к этому имени (те же объекты подов запускаются на ней заново): поэтому восстановление быстрое. С другим именем поды удалил бы сборщик мусора и они были бы перепланированы. Если скрипт прерван: `docker ps -a | grep <нода>`, `kubectl get nodes`; недособранную ноду удалить (`kubectl delete node <нода>; docker rm -f <нода>`) и собрать заново скриптом.
 
 Не проверяется: замена нод с состоянием (`pg`, `redis`, `consul`, `s3`): их тома `local-path` привязаны к ноде, потеря `s3`-ноды навсегда означает потерю блобов (резервирования нет, D1).
+
+### P4.9 Потеря `app`-ноды: сканирование Trivy продолжается
+
+Trivy работает в двух репликах (StatefulSet, по одной на `app`-ноду, у каждой свой PVC и свои базы уязвимостей ≈ 1,3 ГБ, очередь и результаты — в Redis), Service `harbor-trivy` с `PreferSameNode`. Разрушающая проверка: убивается нода с одной из реплик, а сканирование идёт непрерывно.
+
+```bash
+hack/tests/h49-trivy-node-loss.sh                  # harbor-worker2 (нода с harbor-trivy-1); около 6 минут
+# необязательно: HOLD=130 (сколько секунд держать ноду мёртвой), WORKDIR=<каталог логов>
+```
+
+Что делает: прогревает обе реплики (скан идёт на Trivy той ноды, где работает jobservice, поэтому вторая реплика получает базу не сразу: первый скан на «холодной» реплике ≈ 25 с и +1,3 ГБ на общий диск), 3 контрольных скана, `docker kill`, скан каждые ≈ 5 с в течение `HOLD`, `docker start`, ожидание `2/2`, 3 скана; печатает по фазам число успешных и неудачных сканов и время до `Success`.
+
+Ожидается (приёмка 2026-09-25): все сканы во всех фазах `Success` (контроль 11 из 11, во время потери ноды **15 из 15**, после 3 из 3), время до `Success` ≈ 4–6 с; после возврата ноды `harbor-trivy` `2/2`. Если сканы во время потери падают — проверить `kubectl get pods -l component=trivy -o wide` (две реплики на разных нодах?), `kubectl get svc harbor-trivy -o jsonpath='{.spec.trafficDistribution}'` (`PreferSameNode`) и что у обеих реплик есть база (`kubectl exec harbor-trivy-N -- du -sm /home/scanner/.cache`, около 1400 МБ).
 
 ### P6.2 `synchronous_mode` Patroni (справочная проверка, H6.2)
 
@@ -706,7 +719,7 @@ hack/tests/h48-node-replace.sh harbor-worker    # другая app-нода
 | Поды Harbor перезапускаются при переключении Redis (`Container core failed liveness probe`) | пробы core/jobservice зависают, пока Redis недоступен; в chart 1.18.3 их нельзя задать значениями, поэтому `hack/helm-postrender.py` делает liveness этих подов терпимой ≈ 60 с (`timeoutSeconds: 5`, `failureThreshold: 6`); проверить `kubectl get deploy harbor-core -o jsonpath='{.spec.template.spec.containers[0].livenessProbe}'` |
 | Адрес Infra LB (`172.20.0.100`) недоступен после потери lb-ноды | Keepalived переносит VIP на другую ноду за секунды (в приёмке — самый долгий перерыв 5,2 с); проверить, что второй `infra-lb` жив и на его ноде VIP есть (V3.2), `ip neigh show 172.20.0.100` (MAC совпадает с живой lb-нодой?), логи keepalived |
 | Harbor: `helm upgrade` падает `yaml: ... found character '\t'` в post-renderer | шаблон `trivy-sts.yaml` chart 1.18.3 содержит TAB, PyYAML его не принимает; `hack/helm-postrender.py` убирает хвостовые пробелы и табы до разбора — если ошибка вернулась, проверить, что эта строка на месте |
-| `harbor-trivy-0` в `CrashLoopBackOff` или `Pending` после замены ноды | том `local-path` привязан к погибшей ноде (на новой каталог пуст или PV не подходит): `kubectl delete pvc data-harbor-trivy-0; kubectl delete pod harbor-trivy-0` — Trivy заново скачает базу; поднимется на любой `app`-ноде |
+| `harbor-trivy-N` в `CrashLoopBackOff` или `Pending` после замены ноды | том `local-path` привязан к погибшей ноде (на новой каталог пуст или PV не подходит): `kubectl delete pvc data-harbor-trivy-N; kubectl delete pod harbor-trivy-N` — Trivy заново скачает базу (≈ 1,3 ГБ); поднимется на любой `app`-ноде |
 | Сбросить один компонент | удалить его Secret **и** PVC (`data-<имя>-N`), затем `make <таргет>`; удалять только Secret нельзя: новый пароль не совпадёт с данными |
 | Всё сломалось | `make cluster-delete && make cluster && make ha-deps && make infra-lb && make harbor-ha && make deploy-app` (около 10 минут с кэшем образов: `make images-load` до и после `make cluster`) |
 

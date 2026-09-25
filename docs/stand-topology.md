@@ -28,7 +28,7 @@ flowchart TB
         core["core x2"]
         registry["registry x2"]
         jobs["jobservice x2"]
-        trivy["trivy x1"]
+        trivy["trivy x2"]
     end
 
     subgraph hlb["Harbor LB: роль lb, 2 ноды"]
@@ -81,8 +81,8 @@ Ingress-контроллера нет: Harbor отдаётся собствен�
 | Нода | Роль | IP (снимок) | Что на ней работает |
 |------|------|-------------|---------------------|
 | `harbor-control-plane` | control-plane (без роли) | 172.20.0.14 | Kubernetes API, etcd, coredns, local-path-provisioner; demo-приложение `hello` (NodePort 30500) |
-| `harbor-worker` | `app` | 172.20.0.11 | по одной реплике nginx, core, portal, registry, jobservice |
-| `harbor-worker2` | `app` | 172.20.0.5 | по одной реплике nginx, core, portal, registry, jobservice; `harbor-trivy-0` |
+| `harbor-worker` | `app` | 172.20.0.11 | по одной реплике nginx, core, portal, registry, jobservice, trivy (`harbor-trivy-0`) |
+| `harbor-worker2` | `app` | 172.20.0.5 | по одной реплике nginx, core, portal, registry, jobservice, trivy (`harbor-trivy-1`) |
 | `harbor-worker3` | `lb` | 172.20.0.12 | `infra-lb` (HAProxy + Keepalived), HAProxy (Harbor LB) |
 | `harbor-worker4` | `lb` | 172.20.0.3 | `infra-lb` (HAProxy + Keepalived), HAProxy (Harbor LB) |
 | `harbor-worker5` | `pg` | 172.20.0.2 | `pg-0` (Patroni + PostgreSQL) |
@@ -129,7 +129,7 @@ Ingress-контроллера нет: Harbor отдаётся собствен�
 | Harbor portal | `harbor-portal.default`:80 | nginx | `harbor-portal` x2 (`app`) |
 | Harbor registry | `harbor-registry.default`:5000, 8080 | nginx, core | `harbor-registry` x2 (`app`) |
 | Harbor jobservice | `harbor-jobservice.default`:80 | core | `harbor-jobservice` x2 (`app`) |
-| Harbor trivy | `harbor-trivy.default`:8080 | core, jobservice | `harbor-trivy-0` (`app`) |
+| Harbor trivy | `harbor-trivy.default`:8080 | core, jobservice | `harbor-trivy-0`, `harbor-trivy-1` (`app`, по одной на ноду; Service с `PreferSameNode`) |
 | Harbor LB: PostgreSQL | `harbor-lb.harbor-deps`:5432 | core, jobservice, registry | `harbor-lb` x2 (`lb`) -> текущий primary Patroni |
 | Harbor LB: Redis | `harbor-lb.harbor-deps`:6379 | core, jobservice, registry, trivy | `harbor-lb` x2 (`lb`) -> текущий master |
 | Harbor LB: статистика | `harbor-lb.harbor-deps`:8404 (`/stats`, `/healthz`) | оператор | `harbor-lb` x2 (`lb`) |
@@ -169,7 +169,7 @@ Keepalived (`hack/ha/infra-lb.yaml`): VRRP на `eth0`, адрес `172.20.0.100
 | Метаданные Harbor | PostgreSQL 15, БД `registry`, PVC `data-pg-0/1` | 5 ГБ на под | асинхронная репликация |
 | Кэш, очереди, сессии | Valkey, PVC `data-redis-0..2` | 1 ГБ на под | `appendonly yes`; индексы БД Harbor: 0 core, 1 jobservice, 2 registry, 5 trivy |
 | Состояние кластера Patroni | Consul, PVC `data-consul-0..2` | 1 ГБ на под | ключи `service/harbor-pg/*` |
-| Кэш базы уязвимостей Trivy | PVC `data-harbor-trivy-0` | 5 ГБ | единственный PVC самого Harbor |
+| Кэш баз уязвимостей Trivy | PVC `data-harbor-trivy-0/1` | 5 ГБ на под (заполнено ≈ 1,3 ГБ: trivy-db + java-db, каждая реплика качает свои) | единственные PVC самого Harbor; привязаны к ноде (`local-path`) |
 | Логи задач jobservice | в БД (`jobLoggers: [database]`) | | общего тома нет |
 
 ## Учётные данные и секреты

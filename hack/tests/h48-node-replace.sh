@@ -11,7 +11,8 @@
 #   3. a replacement node is built by hand (kind cannot add a node to a running cluster): a new kindest/node container with
 #      the same name, role label and taint, joined with `kubeadm join` using the config the dead node had (fresh token);
 #   4. the cached images of the role are loaded into it (hack/image-cache.sh load), Pending pods must schedule, Deployments
-#      must be 2/2 again; Trivy's PVC (local-path, bound to the dead node) is checked and, if the pod is stuck, reset.
+#      must be 2/2 again; the PVC of the Trivy replica that lived on the dead node (local-path, bound to it) is checked and, if
+#      the pod is stuck, reset.
 # Load is the same as in h44 (manifest, blob, docker pull, no client retries in curl); the analysis is h44_analyze.py.
 set -uo pipefail
 NODE=${1:-harbor-worker2}; CLUSTER=${CLUSTER:-harbor}
@@ -98,16 +99,18 @@ echo "== load the cached images of the role into the new node"
 CLUSTER=$CLUSTER KIND=$KIND "$ROOT/hack/image-cache.sh" load 2>&1 | grep -E "loaded on|FAILED" | head -20
 T=$SECONDS; wait_for "deployments 2/2" 420 ready_all; ev recovered; echo "   all Deployments 2/2 after $((SECONDS-T)) s"
 
-echo "== Trivy (StatefulSet with a node-local PVC)"
+echo "== Trivy (StatefulSet, 2 replicas, each with a node-local PVC)"
 sleep 20
-kubectl get pod harbor-trivy-0 -o wide --no-headers 2>/dev/null | awk '{print "   "$1,$2,$3,$7}'
-if ! kubectl wait --for=condition=ready pod/harbor-trivy-0 --timeout=20s >/dev/null 2>&1; then
-  echo "   harbor-trivy-0 is not Ready: $(kubectl get pod harbor-trivy-0 -o jsonpath='{.status.conditions[?(@.type=="PodScheduled")].message}' 2>/dev/null | cut -c1-220)"
-  echo "   -> reset: its local-path PVC (bound to the dead node) and the pod are deleted, Trivy re-downloads its database"
-  kubectl delete pvc data-harbor-trivy-0 --wait=false >/dev/null 2>&1; kubectl delete pod harbor-trivy-0 --wait=true >/dev/null 2>&1
-  wait_for "trivy ready" 300 kubectl wait --for=condition=ready pod/harbor-trivy-0 --timeout=5s; ev trivy-reset
-  kubectl get pod harbor-trivy-0 -o wide --no-headers | awk '{print "   "$1,$2,$3,$7}'
-fi
+kubectl get pods -l component=trivy -o wide --no-headers 2>/dev/null | awk '{print "   "$1,$2,$3,$7}'
+for i in 0 1; do pod=harbor-trivy-$i
+  if ! kubectl wait --for=condition=ready pod/$pod --timeout=20s >/dev/null 2>&1; then
+    echo "   $pod is not Ready: $(kubectl get pod $pod -o jsonpath='{.status.conditions[?(@.type=="PodScheduled")].message}' 2>/dev/null | cut -c1-220)"
+    echo "   -> reset: its local-path PVC (bound to the dead node) and the pod are deleted, Trivy re-downloads its database"
+    kubectl delete pvc data-$pod --wait=false >/dev/null 2>&1; kubectl delete pod $pod --wait=true >/dev/null 2>&1
+    wait_for "$pod ready" 300 kubectl wait --for=condition=ready pod/$pod --timeout=5s; ev trivy-reset
+    kubectl get pod $pod -o wide --no-headers | awk '{print "   "$1,$2,$3,$7}'
+  fi
+done
 sleep 20; ev settled
 touch "$STOP"; wait
 

@@ -2,7 +2,7 @@
 
 Mirror of one specific production stand on a single machine: a 14-node KinD cluster with Harbor **2.14.3** (chart `1.18.3`) in active-active, **Keepalived + HAProxy** as the Infra LB, external PostgreSQL **15.19** under Patroni + Consul, Redis Sentinel and Garage S3 (stands in for Ceph RGW). Fork of [harbor-active-active-on-kind](https://github.com/it255ru/harbor-active-active-on-kind) (@ `7279079`, full history kept), which itself forks [harbor-on-kind](https://github.com/it255ru/harbor-on-kind); the differences from the parent are decisions D11-D17 in [backlog.md](backlog.md). Published at https://github.com/it255ru/harbor-prod-mirror-on-kind.
 
-**Status (2026-09-25):** the stand builds from scratch (about 10 minutes with the image cache), `make verify` gives 38 PASS / 0 FAIL and the failure tests in `hack/tests/` (h41-h48, h62) were run on this stack; the results are in the table under "Failure behaviour" and in `backlog.md` → P5. Node/address map: [docs/stand-topology.md](docs/stand-topology.md). Check-by-check procedure: [docs/verification-runbook.md](docs/verification-runbook.md).
+**Status (2026-09-25):** the stand builds from scratch (about 10 minutes with the image cache), `make verify` gives 38 PASS / 0 FAIL and the failure tests in `hack/tests/` (h41-h49, h62) were run on this stack; the results are in the table under "Failure behaviour" and in `backlog.md` → P5. Node/address map: [docs/stand-topology.md](docs/stand-topology.md). Check-by-check procedure: [docs/verification-runbook.md](docs/verification-runbook.md).
 
 ## Architecture
 
@@ -10,7 +10,7 @@ Mirror of one specific production stand on a single machine: a 14-node KinD clus
 
 | Role | Nodes | Runs |
 |------|-------|------|
-| app | 2 | Harbor nginx (the entry point), core, portal, registry, jobservice (2 replicas each) and Trivy (1) |
+| app | 2 | Harbor nginx (the entry point), core, portal, registry, jobservice and Trivy (2 replicas each) |
 | lb | 2 | HAProxy "Harbor LB" (PostgreSQL and Redis entry point); Infra LB: Keepalived (VIP) + HAProxy on every lb node |
 | pg | 2 | PostgreSQL 15 under Patroni |
 | redis | 3 | Valkey with a Sentinel sidecar (1 master, 2 replicas) |
@@ -94,8 +94,8 @@ harbor-worker13        Ready    <none>          65m   v1.34.0   s3
 
 pods by node (which pod is where inside a role varies between builds):
 harbor-control-plane   hello-deployment x2 (demo app)
-harbor-worker          harbor-nginx, harbor-core, harbor-jobservice, harbor-portal, harbor-registry
-harbor-worker2         harbor-nginx, harbor-core, harbor-jobservice, harbor-portal, harbor-registry, harbor-trivy-0
+harbor-worker          harbor-nginx, harbor-core, harbor-jobservice, harbor-portal, harbor-registry, harbor-trivy-0
+harbor-worker2         harbor-nginx, harbor-core, harbor-jobservice, harbor-portal, harbor-registry, harbor-trivy-1
 harbor-worker3/4       harbor-lb, infra-lb (haproxy + keepalived)
 harbor-worker5/6       pg-0, pg-1            harbor-worker7/8/9    redis-0, redis-1, redis-2
 harbor-worker10/11/12  consul-0, consul-1, consul-2              harbor-worker13   garage-0
@@ -118,7 +118,7 @@ Global alias:  registry-blobs
 Objects:       102
 ```
 
-The image blobs are in Garage, not on a volume: the only PVC of Harbor itself is Trivy's cache. Roles move: after a failure the leader/master can be on any node of its role, so read the current holder instead of assuming it.
+The image blobs are in Garage, not on a volume: the only PVCs of Harbor itself are the two Trivy caches (`data-harbor-trivy-0/1`). Roles move: after a failure the leader/master can be on any node of its role, so read the current holder instead of assuming it.
 
 ## Verify and test
 
@@ -134,7 +134,8 @@ The failure tests are scripts in `hack/tests/`. They run real load, kill real no
 | `h44-node-loss.sh [node]` | kills an `app` node under load, waits for eviction, brings it back | 4-8 min |
 | `h45-app-rollout.sh` | rolls the demo app to a freshly pushed tag; `DEGRADE=1` with one registry and one core killed | 1 min |
 | `h46-proxy-cache.sh` | proxy-cache project for Docker Hub, served from the cache with the upstream cut off | 4 min |
-| `h48-node-replace.sh [node]` | permanent loss of an `app` node: kills it for good, deletes the node, builds and joins a replacement, reloads the cached images, resets Trivy's PVC | 6 min |
+| `h48-node-replace.sh [node]` | permanent loss of an `app` node: kills it for good, deletes the node, builds and joins a replacement, reloads the cached images, resets the PVC of the Trivy replica that lived there | 6 min |
+| `h49-trivy-node-loss.sh [node]` | loses the app node of one of the two Trivy replicas while a scan runs every ~5 s; checks that scans keep succeeding | 6 min |
 | `h62-sync-mode.sh <off\|on\|strict>` | what Patroni `synchronous_mode` changes: deletes the replica pod, then the leader pod under a writer; restores the config | 4 min |
 | `h47-role-failure.sh <lb\|pg\|redis\|consul\|s3>` | kills the node of the role holder under load, checks lost acknowledged writes (`s3`: the objects in the bucket) | 3-5 min each |
 
@@ -146,13 +147,13 @@ Measured on this stack (Harbor 2.14.3, PostgreSQL 15.19, Keepalived + HAProxy), 
 |---------|------------------|------|
 | Replica of core/registry killed during a push | 1-2 x 502, the client retries, the push completes | intact |
 | Rolling update of core/registry (`preStop` sleep, see below) | no errors (0 of 318 manifests, 114 blobs, 241 pulls) | intact |
-| `app` node lost (nginx, core, portal, registry, jobservice, Trivy) | no stalls: the slowest request was 2.1 s (HAProxy notices the dead nginx in ~2-3 s); 1 of 2208 manifests, 1 of 784 blobs, 1 of 1311 pulls failed (the one in flight at the kill); Trivy is down until the node is back. The internal Services use `trafficDistribution: PreferSameNode` (D17), so a surviving node never calls the dead one | intact |
+| `app` node lost (nginx, core, portal, registry, jobservice, Trivy) | no stalls: the slowest request was 2.1 s (HAProxy notices the dead nginx in ~2-3 s); 1 of 2208 manifests, 1 of 784 blobs, 1 of 1311 pulls failed (the one in flight at the kill); vulnerability scans keep working on the second Trivy replica (`h49`: 15 of 15 scans succeeded during the outage, max 6 s). The internal Services use `trafficDistribution: PreferSameNode` (D17), so a surviving node never calls the dead one | intact |
 | Consul leader node | nothing visible (0 errors); raft elects a new leader | intact |
 | Redis master node | ~21-25 s without Redis: requests stall up to 21 s, 1 of 38 pushes failed; core/jobservice are **not** restarted | no acknowledged write lost |
 | PostgreSQL primary node | ~33 s without writes, 5xx for requests that need the database (122 of 690 manifests, 37 of 243 blobs, 1 of 32 pushes; 0 of 623 pulls) | none lost in the test, but replication is asynchronous |
 | `lb` node that holds the Infra LB address (VIP) | the VIP moves to the other node: 2 of 621 manifests failed, longest gap 5.2 s, 0 pull/push failures; no second blip when the node returns (`nopreempt`); new connections to PostgreSQL/Redis through the dead HAProxy fail (19 of 421 / 24 of 442) | intact |
 | `s3` node (Garage, the only one, no redundancy) | the whole data path of the registry is down while the node is (~110 s without a successful request through the VIP, manifests are in S3 too; `docker pull` waits up to 65 s and completes; UI, API, PostgreSQL and Redis are not affected); Harbor recovers on its own 13 s after the node returns, no Harbor pod restarts | intact (209 of 209 objects) |
-| `app` node lost for good and replaced (`h48`) | manifests 0 of 1353, blobs 1 of 501, 1 of 719 pulls failed (the one in flight at the kill); all Deployments are 2/2 again 231 s after the loss (node deleted 60 s after NotReady, replacement built by hand and joined, images loaded from the cache); Trivy's node-local PVC must be reset (the script does it) | intact |
+| `app` node lost for good and replaced (`h48`) | manifests 0 of 1353, blobs 1 of 501, 1 of 719 pulls failed (the one in flight at the kill); all Deployments are 2/2 again 231 s after the loss (node deleted 60 s after NotReady, replacement built by hand and joined, images loaded from the cache); the node-local PVC of the Trivy replica that lived there must be reset (the script does it) | intact |
 
 `synchronous_mode` of Patroni is off (backlog D8); `h62` measured what it would change: with `on` the leader loss costs a 7.3 s write pause instead of 10.3 s and no acknowledged write is at risk while the sync replica lives, with `strict` losing the replica blocks writes for ~16 s.
 

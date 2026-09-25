@@ -81,7 +81,7 @@ echo "== START $NODE"
 docker start "$NODE" >/dev/null; ev node-up
 T=$SECONDS; wait_for "node Ready" 300 node_ready; ev node-ready; echo "   Ready after $((SECONDS-T)) s"
 T=$SECONDS; wait_for "deployments 2/2" 420 ready_all; ev recovered; echo "   all Deployments 2/2 after $((SECONDS-T)) s"
-wait_for "trivy ready" 240 kubectl wait --for=condition=ready pod/harbor-trivy-0 --timeout=5s
+wait_for "trivy 2/2" 240 bash -c "[ \"\$(kubectl get sts harbor-trivy -o jsonpath={.status.readyReplicas})\" = 2 ]"
 sleep 20; ev settled
 touch "$STOP"; wait
 
