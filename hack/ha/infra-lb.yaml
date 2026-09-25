@@ -20,10 +20,10 @@ data:
     defaults
       mode tcp
       log global
-      timeout connect 5s
+      timeout connect 2s
       timeout client 30m
       timeout server 30m
-      timeout check 3s
+      timeout check 2s
       retries 2
       option redispatch
 
@@ -56,7 +56,7 @@ data:
     # and while Kubernetes still lists a dead core pod (until its node is NotReady, ~50 s) the ping hangs on a healthy nginx too,
     # which switched off BOTH nginx and made a lost app node a full outage (found in P5, h44).
     backend harbor_https
-      default-server check check-ssl verify none inter 3s fall 3 rise 2 on-marked-down shutdown-sessions resolvers k8s init-addr none resolve-prefer ipv4
+      default-server check check-ssl verify none inter 1s fall 2 rise 2 on-marked-down shutdown-sessions resolvers k8s init-addr none resolve-prefer ipv4
       server-template nginx 4 harbor-nginx-headless.default.svc.cluster.local:8443
 
     backend harbor_http
@@ -125,7 +125,7 @@ spec:
         app: infra-lb
       annotations:
         # roll pods when the config changes
-        config-version: "5"
+        config-version: "6"
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet

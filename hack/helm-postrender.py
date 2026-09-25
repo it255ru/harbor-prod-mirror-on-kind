@@ -37,6 +37,13 @@ PDB_COMPONENTS = {"harbor-nginx": "nginx", "harbor-core": "core", "harbor-portal
 # probes (core: failureThreshold 2, period 10; jobservice: initialDelaySeconds 300), so the fields are added here.
 LIVENESS = {"harbor-core": {"timeoutSeconds": 5, "failureThreshold": 6},
             "harbor-jobservice": {"timeoutSeconds": 5, "failureThreshold": 6}}
+
+# Internal Harbor calls (nginx -> core/portal/registry, core -> registry/jobservice) go through ClusterIP Services, and kube-proxy
+# keeps a dead pod in the endpoints until its node is NotReady (~50 s): a third to a half of the new connections hang for that
+# time (h44). Every app node runs one replica of each component, so prefer the endpoint on the caller's own node: a surviving
+# node then never talks to the dead one. PreferSameNode is only a preference: without a local endpoint (a pod restarting on
+# this node) traffic goes to the other node as before. Chart 1.18.3 has no value for it.
+SAME_NODE = {"harbor-core", "harbor-portal", "harbor-registry", "harbor-jobservice"}
 extra = []
 for d in docs:
     if d.get("kind") == "Deployment" and d["metadata"]["name"] in TARGETS:
@@ -53,6 +60,8 @@ for d in docs:
                       "metadata": {"name": d["metadata"]["name"], "namespace": d["metadata"].get("namespace", "default"),
                                    "labels": d["metadata"].get("labels", {})},
                       "spec": {"minAvailable": 1, "selector": {"matchLabels": {"app": "harbor", "component": PDB_COMPONENTS[d["metadata"]["name"]]}}}})
+    if d.get("kind") == "Service" and d["metadata"]["name"] in SAME_NODE:
+        d["spec"]["trafficDistribution"] = "PreferSameNode"
     # nginx proxies to the Services core/portal, so $upstream_addr is a ClusterIP, not a pod: the column is useless for
     # per-replica counts (V12 counts per nginx pod and in the registry log) but names the upstream Service in a 5xx line.
     if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "harbor-nginx" and "nginx.conf" in d.get("data", {}):
