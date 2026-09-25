@@ -145,7 +145,7 @@ Measured on this stack (Harbor 2.14.3, PostgreSQL 15.19, Keepalived + HAProxy), 
 |---------|------------------|------|
 | Replica of core/registry killed during a push | 1-2 x 502, the client retries, the push completes | intact |
 | Rolling update of core/registry (`preStop` sleep, see below) | no errors (0 of 318 manifests, 114 blobs, 241 pulls) | intact |
-| `app` node lost (nginx, core, portal, registry, jobservice, Trivy) | for ~52 s until Kubernetes declares the node lost some requests hang up to 30 s (the client timeout), then normal: 3 of 1929 manifests, 3 of 701 blobs, 1 of 1146 pulls failed; Trivy is down until the node is back. nginx reaches core/registry through Services, which keep a dead pod's endpoint until NotReady | intact |
+| `app` node lost (nginx, core, portal, registry, jobservice, Trivy) | no stalls: the slowest request was 2.1 s (HAProxy notices the dead nginx in ~2-3 s); 1 of 2208 manifests, 1 of 784 blobs, 1 of 1311 pulls failed (the one in flight at the kill); Trivy is down until the node is back. The internal Services use `trafficDistribution: PreferSameNode` (D17), so a surviving node never calls the dead one | intact |
 | Consul leader node | nothing visible (0 errors); raft elects a new leader | intact |
 | Redis master node | ~21-25 s without Redis: requests stall up to 21 s, 1 of 38 pushes failed; core/jobservice are **not** restarted | no acknowledged write lost |
 | PostgreSQL primary node | ~33 s without writes, 5xx for requests that need the database (122 of 690 manifests, 37 of 243 blobs, 1 of 32 pushes; 0 of 623 pulls) | none lost in the test, but replication is asynchronous |

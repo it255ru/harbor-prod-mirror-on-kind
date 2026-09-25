@@ -546,11 +546,13 @@ EVICT_WAIT=0 hack/tests/h44-node-loss.sh harbor-worker   # без ожидани
 
 Ожидается (приёмка 2026-09-25, `harbor-worker2`: nginx, core, portal, registry, jobservice, trivy):
 
-- нода `NotReady` примерно через 51 с; в этот момент её поды исчезают из Endpoints (`endpoints-updated`);
-- полного отказа нет: манифесты 3 из 1929, блобы 3 из 701, `docker pull` 1 из 1146 (тот, что шёл в момент `docker kill`);
-- до `NotReady` (≈ 52 с) часть запросов **зависает до 30 с** (таймаут клиента): nginx обращается к core и registry через Service, а kube-proxy держит мёртвый под в endpoints до `NotReady`; после — доли секунды;
-- при ожидании вытеснения (`evicted` ≈ +352 с) замены core/portal/registry/jobservice/nginx в `Pending` (`didn't match pod topology spread constraints`), trivy `Terminating` на мёртвой ноде;
+- нода `NotReady` примерно через 48 с; в этот момент её поды исчезают из Endpoints (`endpoints-updated`);
+- зависаний нет: самый медленный запрос 2,1 с, манифесты 1 из 2208, блобы 1 из 784, `docker pull` 1 из 1311 (тот, что шёл в момент `docker kill`); единичная ошибка — соединение к мёртвому nginx до срабатывания проверки HAProxy (≈ 2–3 с);
+- это обеспечивает `trafficDistribution: PreferSameNode` на Service core, portal, registry, jobservice (D17): живая нода ходит к своим локальным репликам. Без него (прогоны до D17) до NotReady часть запросов висела до 30 с — nginx и core обращались через ClusterIP и попадали на мёртвый под;
+- при ожидании вытеснения (`evicted` ≈ +348 с) замены core/portal/registry/jobservice/nginx в `Pending` (`didn't match pod topology spread constraints`), trivy `Terminating` на мёртвой ноде;
 - после `docker start` нода `Ready` за секунды, Deployment'ы `2/2` примерно за минуту, распределение 1+1 (V11.1), trivy на своей ноде.
+
+Если зависания до 30 с вернулись — проверить `kubectl get svc harbor-core harbor-registry -o custom-columns=N:.metadata.name,TD:.spec.trafficDistribution` (ожидается `PreferSameNode`; поле ставит `hack/helm-postrender.py`, потерять его может установка без post-renderer) и `hints.forNodes` в EndpointSlice.
 
 **Полный отказ на ≈ 21 с в этом тесте** (`http 000 rc=35` за миллисекунды, все запросы падают) означает, что HAProxy Infra LB не имеет ни одного `UP`-бэкенда: проверка бэкенда делает HTTP-запрос через nginx к core. Проверка должна быть TCP + TLS-handshake (`check-ssl`), см. «Диагностику».
 

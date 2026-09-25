@@ -70,7 +70,7 @@ flowchart TB
 
 Поток запроса `docker push`: клиент → `172.20.0.100` (VIP Keepalived) → HAProxy на ноде, держащей VIP (TCP, TLS не разбирает) → nginx Harbor (завершает TLS, сертификат из Secret `harbor-ha-ingress-tls`) → core (проверка токена) → registry → блобы в S3 (Garage); метаданные (проекты, артефакты, пользователи) — в PostgreSQL, кэш и очереди — в Redis. Harbor LB направляет соединения к БД на текущий primary Patroni, соединения к Redis — на текущий master.
 
-Ingress-контроллера нет: Harbor отдаётся собственным nginx чарта (`expose.type: clusterIP`, решение D15 в `backlog.md`). Это значит, что nginx обращается к core, portal и registry через Service (ClusterIP), а не к подам напрямую: мёртвый под остаётся в endpoints Service, пока Kubernetes не признает ноду потерянной (≈ 52 с), и часть запросов в это окно зависает.
+Ingress-контроллера нет: Harbor отдаётся собственным nginx чарта (`expose.type: clusterIP`, решение D15 в `backlog.md`). nginx обращается к core, portal и registry через Service (ClusterIP), а не к подам напрямую, и до NotReady (≈ 50 с) kube-proxy держал бы в endpoints мёртвый под. Поэтому внутренние Service Harbor (core, portal, registry, jobservice) заданы с `trafficDistribution: PreferSameNode` (D17): на каждой `app`-ноде по одной реплике, вызывающий под ходит к соседу на своей ноде, и мёртвая нода живой не мешает; без локального endpoint kube-proxy идёт на другую ноду (`kubectl get endpointslices -l kubernetes.io/service-name=harbor-registry` показывает `hints.forNodes`).
 
 Бэкапы, Prometheus и Nexus с исходной схемы в лабораторию не входят (решения D8, D10 в `backlog.md`).
 
