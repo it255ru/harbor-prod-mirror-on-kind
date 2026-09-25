@@ -1,12 +1,12 @@
 # CLAUDE.md
 
-Repo: **harbor-prod-mirror-on-kind**. Fork of `harbor-active-active-on-kind` @ `7279079` (2026-09-25, full history kept; published as https://github.com/it255ru/harbor-prod-mirror-on-kind), which is itself a fork of `harbor-on-kind` @ `b65df71`. Same 14-node KinD HA lab, but aimed at mirroring one specific production stand instead of the parent's general HA scheme: Harbor **`2.14.3`** (not 2.15.2), HAProxy **+ Keepalived** as the Infra LB (not MetalLB/ingress-nginx), external PostgreSQL downgraded to **`15.19`** (not 18.6) to match what chart `1.18.3` documents. Redis Sentinel, Patroni + Consul, Garage stay as in the parent (D11–D14, `backlog.md`).
+Repo: **harbor-prod-mirror-on-kind** (https://github.com/it255ru/harbor-prod-mirror-on-kind). Fork of `harbor-active-active-on-kind` @ `7279079` (itself a fork of `harbor-on-kind` @ `b65df71`; full history kept). The same 14-node KinD HA lab, aimed at mirroring one specific production stand: Harbor **2.14.3** (chart `1.18.3`), **Keepalived + HAProxy** as the Infra LB (no MetalLB/ingress-nginx), external PostgreSQL **15.19** under Patroni + Consul, Redis Sentinel, Garage S3 (stands in for Ceph RGW).
 
-**Status:** P0–P6, P3a (the `backlog.md` rewrite: it now describes this fork only, the parent's full backlog is `git show 7279079:backlog.md`) done — the fork's plan is closed. **P5 is done (2026-09-25): the stand was built from scratch, `make verify` gives 38 PASS / 0 FAIL, and the failure tests in `hack/tests/` (h41-h47) passed on this stack (`h62` not run); measured timings are in `backlog.md` → P5 and the README table.** The running cluster of the parent repo was deleted at the user's request. `hack/images.txt` / `CHARTS` (chart `1.18.3`) match what `hack/` deploys now. Everything the parent's CLAUDE.md said about Phases 0–4/H5.x/Phase 6 is still true of the inherited code, and is not repeated here — see `backlog.md`'s "Унаследовано от родителя" section.
+**Status (2026-09-25):** the plan `P0–P6` in `backlog.md` is complete. The stand builds from scratch (`make cluster` → `ha-deps` → `infra-lb` → `harbor-ha` → `deploy-app`, about 10 minutes with the image cache), `make verify` gives 38 PASS / 0 FAIL, and the failure tests `hack/tests/h41…h48`, `h62` were run on this stack; measured timings are in `backlog.md` → P5 and the failure-behaviour table in `README.md`. The parent's full backlog is `git show 7279079:backlog.md`; what still applies from it is in `backlog.md` → "Что унаследовано".
 
 ## Rules
 
-- The **P0–P6 plan in `backlog.md` is complete**; for new work add items there in order and tick `- [ ]` → `- [x]` when an item is finished, with the result recorded there. The parent's Phase 0–6/H-items are closed history (`git show 7279079:backlog.md`; the lessons that still apply are in `backlog.md` → "Что унаследовано"); don't re-do them.
+- New work goes into `backlog.md` as new plan items, in order: tick `- [ ]` → `- [x]` when an item is finished, with the result recorded there. Don't re-do the parent's closed items.
 - **Ask when a new decision appears, do not pick silently.** This fork's own decisions are D11–D17 in `backlog.md` (D11 Keepalived + HAProxy replace the Infra LB; D12 Harbor 2.14.3/chart 1.18.3 with the official image (its version string is `v2.14.3-fa517e2a`, exactly what prod shows: `fa517e2a` is the git commit, not a vendor build); D13 PostgreSQL 15.19; D14 own minimal Keepalived image; D15 Harbor exposed through the chart's nginx, no Ingress; D16 one hostNetwork DaemonSet `infra-lb`; D17 `PreferSameNode` on the internal Harbor Services; D14–D17 are the plan author's calls, open to revision). Inherited from the parent: D1 14 nodes (1 control-plane + app×2, lb×2, pg×2, redis×3, consul×3, s3×1), D2 Patroni + Consul, D3 Redis Sentinel (an *assumption*, the prod mode is unknown — this fork confirms Sentinel matches prod), D4/D4a S3 = Garage, D5 one lab cluster at a time, D6 two-stage success, D7 HAProxy as Harbor LB (its own note that prod likely uses keepalived for the shared address is exactly what D11 now implements), D8 minimum scope, D9/D10 colors ignored and Nexus out of scope.
 - **Don't invent versions.** Every new component gets an explicit pinned version (and image digest) recorded in `backlog.md`, `README.md` and the table below **before** it is installed. Verify Harbor chart keys with `helm show values harbor/harbor --version 1.18.3` (not `1.19.2` — that's the parent's), not from memory.
 - Target architecture: Harbor app ×2 → Harbor LB ×2 (HAProxy, in front of PostgreSQL and Redis, **not** the Harbor ingress) → PostgreSQL ×2 under Patroni with state in Consul ×3, Redis ×3; blobs in S3 (Ceph in prod, Garage here); Infra LB **HAProxy + Keepalived (D11; replaces the parent's ingress-nginx + MetalLB)** in front. Backups, Prometheus and Nexus are out of scope.
@@ -16,26 +16,25 @@ Repo: **harbor-prod-mirror-on-kind**. Fork of `harbor-active-active-on-kind` @ `
 - Report faithfully: a failed or skipped check is reported as such, with its output.
 - `sudo` is interactive-only in agent sessions: `make add-host` (missing entry) and the Docker `insecure-registries` change are run by the user; `make deploy-app` prints the exact commands.
 - Never write to the user's `~/.aws` (no `aws configure set`); for S3 checks use an isolated `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE` (runbook V8.2).
-- `hack/config/harbor.yaml` (single-node values) is legacy: HA replaced the single-node baseline on purpose (H3.3) and no target uses it.
 
 ## Pinned versions
 
-**Below is still the parent's table — what `hack/` actually deploys right now.** The fork's target pins (chart `1.18.3`/app `2.14.3`, PostgreSQL `15.19-alpine3.24`, image digests, Keepalived TBD) are in `backlog.md`'s "Закреплённые версии" table and only take effect as P1–P6 land; update this table in place as each phase lands, don't duplicate it.
+What `hack/` deploys. Image digests and the rest of the table are in `backlog.md` → "Закреплённые версии"; when a pin changes, update the manifests, this table, `README.md` and `backlog.md` together.
 
 | Component | Pinned version |
 |-----------|----------------|
 | Kind CLI | `v0.30.0` |
 | Node image | `kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a` |
-| Keepalived | `2.3.4-r2` on `alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6` — own image (D14, P2); MetalLB and ingress-nginx are removed |
-| Harbor chart / app | `1.18.3` / `2.14.3`, images pinned by digest in `hack/config/harbor-ha.yaml` (D12, P3) |
-| PostgreSQL | `15.19-alpine3.24@sha256:f7d23353…` (Harbor 2.14.3/chart 1.18.3 documents 15.12; D13, P4) |
-| Patroni | `4.1.5` (PyPI, own image, extras `consul`, `psycopg3`) — unchanged |
-| Consul | `1.22.7` (not 2.0.x) — unchanged |
-| HAProxy | `3.4.4-alpine3.24` (LTS) — unchanged pin, second role (Infra LB, P2) |
-| Valkey + Sentinel | `9.0.6-alpine3.24` (Harbor bundles 9.0.3) — unchanged |
-| Garage (S3) | `v2.4.1` (Docker Hub `dxflrs/garage`) — unchanged |
+| Keepalived | `2.3.4-r2` on `alpine:3.24@sha256:294b683c…`, own image (D14) |
+| Harbor chart / app | `1.18.3` / `2.14.3`, images pinned by digest in `hack/config/harbor-ha.yaml` (D12) |
+| PostgreSQL | `15.19-alpine3.24@sha256:f7d23353…` (the chart documents 15.12; D13) |
+| Patroni | `4.1.5` (PyPI, own image, extras `consul`, `psycopg3`) |
+| Consul | `1.22.7` (not 2.0.x: Patroni compatibility not verified) |
+| HAProxy | `3.4.4-alpine3.24` (LTS): Harbor LB and Infra LB |
+| Valkey + Sentinel | `9.0.6-alpine3.24` |
+| Garage (S3) | `v2.4.1` (Docker Hub `dxflrs/garage`) |
 
-Images are also pinned by digest in the manifests; full refs and rationale are in `backlog.md` → "Версии компонентов HA" (parent) and "Закреплённые версии" (this fork's changes). Chart `1.18.3` HA keys in use: `database.type` / `redis.type: external` + `*.external.*`, `persistence.imageChartStorage.type: s3` (`disableredirect: true`), `replicas`, `nodeSelector`, `tolerations`, `topologySpreadConstraints`, `livenessProbe` under `core`/`portal`/`registry`/`jobservice`/`trivy`, `expose.tls.certSource: secret`, `caSecretName`. **Chart `1.18.3` gaps (P3), handled in `hack/helm-postrender.py`:** no values for `podDisruptionBudget` (the post-renderer adds 5 PDBs) and for `core`/`jobservice` `livenessProbe` (hardcoded in the templates; the H4.7 relaxed liveness `timeoutSeconds 5` / `failureThreshold 6` is patched in, otherwise core/jobservice restart during a Redis failover). The chart's `trivy-sts.yaml` has a TAB that PyYAML rejects: the post-renderer strips trailing blanks first. Harbor is exposed through the chart's nginx (`expose.type: clusterIP`, D15), so its image `goharbor/nginx-photon` is pinned too.
+Chart `1.18.3` HA keys in use: `database.type` / `redis.type: external` + `*.external.*`, `persistence.imageChartStorage.type: s3` (`disableredirect: true`), `replicas`, `nodeSelector`, `tolerations`, `topologySpreadConstraints`, `expose.tls.certSource: secret`, `caSecretName`. **Chart `1.18.3` gaps, handled in `hack/helm-postrender.py`:** no values for `podDisruptionBudget` (the post-renderer adds 5 PDBs) and for `core`/`jobservice` `livenessProbe` (hardcoded in the templates; the H4.7 relaxed liveness `timeoutSeconds 5` / `failureThreshold 6` is patched in, otherwise core/jobservice restart during a Redis failover). The chart's `trivy-sts.yaml` has a TAB that PyYAML rejects: the post-renderer strips trailing blanks first. Harbor is exposed through the chart's nginx (`expose.type: clusterIP`, D15), so its image `goharbor/nginx-photon` is pinned too.
 
 ## Commands
 
@@ -56,7 +55,7 @@ make cluster-ctx     # kubectl use-context kind-harbor
 make cluster-delete
 ```
 
-Variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOCALBIN`, `PG_IMAGE`. Tests: `hack/tests/h41…h47`, `h62-sync-mode.sh` (see `README.md`). Checks: `docs/verification-runbook.md` (V1–V12, P4.1–P4.7); run the relevant ones after any change to `hack/ha/` or `hack/config/` and keep the runbook in sync.
+Variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOCALBIN`, `PG_IMAGE`. Tests: `hack/tests/h41…h48`, `h62-sync-mode.sh` (see `README.md`). Checks: `docs/verification-runbook.md` (V1–V12, P4.1–P4.8); run the relevant ones after any change to `hack/ha/` or `hack/config/` and keep the runbook in sync.
 
 ## Gotchas
 
@@ -68,13 +67,13 @@ Variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOC
 - Everything shares one host disk: gigabytes of writes (image builds with `dd`, big pushes) stall etcd/apiserver, crash controller-manager/scheduler (leader election; lease 60/40/10 s is set in `kind-cluster.yaml`) and trigger Sentinel failovers (`down-after` 15000). Keep test data small.
 - Image cache (`hack/image-cache.sh`): `docker save` drops the name of a digest-pinned image, so images are saved under `cache.local/...:cached` and re-tagged inside the node with `ctr -n k8s.io images tag` to the pinned name; do not replace this with a plain `kind load docker-image`.
 - Cold-start image pulls fail transiently (`ErrImagePull`): pods self-heal. Third-party images can vanish (MinIO). The output of `make pg-image` is loaded with `kind load` into the `pg` nodes only and disappears with the cluster.
-- Infra LB (P2): `infra-lb` is a hostNetwork DaemonSet (Keepalived + HAProxy on :80/:443/127.0.0.1:8405). Keepalived is `nopreempt` on both nodes and drops the VIP when the local HAProxy `/healthz` fails; HAProxy backends are the Harbor nginx pods via the headless Service `harbor-nginx-headless` (needs `make harbor-ha` to have any). **Their health check must stay TCP + TLS handshake (`check-ssl`), never an HTTP request through nginx** (`/api/v2.0/ping` goes nginx → core via a Service; while a dead core pod is still an endpoint it hangs on a healthy nginx too and HAProxy switches off both — a full outage when an `app` node dies, found in `h44`). `keepalived.conf` must not be executable (set ConfigMap file modes per item). The keepalived image is built locally (`make keepalived-image`), `imagePullPolicy: Never`, disappears with the cluster. The internal Harbor Services (core, portal, registry, jobservice) carry `trafficDistribution: PreferSameNode` (D17, set by the post-renderer): without it nginx/core keep sending a third to a half of new connections to a dead app node's pods until NotReady (~50 s), stalls up to 30 s (`h44`). No Service is `LoadBalancer` any more: the demo app is a NodePort (30500) on the control-plane.
+- Infra LB: `infra-lb` is a hostNetwork DaemonSet (Keepalived + HAProxy on :80/:443/127.0.0.1:8405). Keepalived is `nopreempt` on both nodes and drops the VIP when the local HAProxy `/healthz` fails; HAProxy backends are the Harbor nginx pods via the headless Service `harbor-nginx-headless` (needs `make harbor-ha` to have any). **Their health check must stay TCP + TLS handshake (`check-ssl`), never an HTTP request through nginx** (`/api/v2.0/ping` goes nginx → core via a Service; while a dead core pod is still an endpoint it hangs on a healthy nginx too and HAProxy switches off both — a full outage when an `app` node dies, found in `h44`). `keepalived.conf` must not be executable (set ConfigMap file modes per item). The keepalived image is built locally (`make keepalived-image`), `imagePullPolicy: Never`, disappears with the cluster. The internal Harbor Services (core, portal, registry, jobservice) carry `trafficDistribution: PreferSameNode` (D17, set by the post-renderer): without it nginx/core keep sending a third to a half of new connections to a dead app node's pods until NotReady (~50 s), stalls up to 30 s (`h44`). No Service is `LoadBalancer` any more: the demo app is a NodePort (30500) on the control-plane.
 
 **Harbor chart, TLS, rollouts**
 
 - The chart resolves `existingSecret` with `lookup` at render time: the Secrets must exist before `helm install`; validate with `DRY_RUN=1 make harbor-ha`, not `helm template`.
 - The token key must be PKCS#1 (`openssl genrsa -traditional`). The CA is created once (Secret `harbor-ha-ingress-tls`, `certSource: secret`): with `auto` every `helm upgrade` regenerates it and new pulls on the node fail with `x509: unknown authority`. `deploy-app` trusts it on the node (needed once).
-- The chart has no `preStop`: `hack/helm-postrender.py` (PyYAML, used by `install-harbor-ha.sh`) adds `preStop: sleep 15` to core/registry/portal; without it rolling updates give 502s. Keep it when changing the install path.
+- The chart has no `preStop`: `hack/helm-postrender.py` (PyYAML, used by `install-harbor-ha.sh`) adds `preStop: sleep 15` to nginx/core/registry/portal; without it rolling updates give 502s. Keep it when changing the install path.
 - 2 replicas on a 2-node role: `topologySpreadConstraints` (maxSkew 1) with `matchLabelKeys: [pod-template-hash]`, not a required `podAntiAffinity` (it deadlocks rolling updates). `harbor-lb` rolls with `maxSurge: 0`; HAProxy needs a `config-version` annotation bump to roll after a config change.
 - Every worker is tainted `harbor-ha/role=<role>:NoSchedule`: any new workload needs a `nodeSelector` and a toleration. The demo app runs on the control-plane node (the only place `deploy-app.sh` installs the CA).
 - `kubernetes.core.k8s_exec` splits `command` with shlex and runs no shell: use `sh -c "... $VAR ..."` (a `\$VAR` stays literal). Ansible checks (`ansible/`): each role appends to `verify_results`; skip `Terminating` pods (`deletionTimestamp`), they still report `Running`.
@@ -89,11 +88,11 @@ Variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOC
 
 - Delete Harbor test artifacts by **digest**, never by tag: deleting an artifact removes all its tags (a test tag on the digest of `python/hello:1.0` deleted the demo image once).
 - The scripts always restore what they change (killed node started again, `tc` removed, CoreDNS Corefile restored). If one is interrupted: `docker start <node>`, check `kubectl get nodes`, `docker exec harbor-worker tc qdisc show dev eth0` (expect `noqueue`) and `kubectl -n kube-system get cm coredns` (the original Corefile has no `template` block; then `rollout restart deploy/coredns`).
+- Replacing an `app` node (`h48`): `kind` cannot add a node to a running cluster, so the script builds a `kindest/node` container and runs `kubeadm join` with the dead node's `/kind/kubeadm.conf`; a node with the same name takes over the pods bound to that name. Trivy's `local-path` PVC is bound to the dead node: delete the PVC and the pod (`kubectl delete pvc data-harbor-trivy-0; kubectl delete pod harbor-trivy-0`). Load the cached images into the new node (`hack/image-cache.sh load`) or it pulls from Docker Hub.
 - H4.6 needs a fresh proxy project name per run (deleting through the API leaves blobs in S3) and does its cold pull with `curl`: docker's content store hides blobs from Harbor. Cached content is addressed by digest, tag pulls need the upstream.
 
 ## Coupling of the entry path
 
-**Since P2 (D11/D15/D16):**
 
 ```
 host: /etc/hosts core.harbor.domain -> 172.20.0.100
@@ -107,7 +106,7 @@ Registry trust outside `deploy-app`: host Docker `insecure-registries: ["core.ha
 ## Demo app
 
 - `python-docker-hello-kube/hello.py` is stdlib-only `http.server` (no pip dependencies: the original Flask app broke on an unpinned Werkzeug). `GET /` → `Hello, Kube! (from <pod hostname>)` (shows which replica answered), `GET /healthz` → `ok`, port 5000. The Dockerfile pins `python:3-alpine@sha256:9e9fde4d…`.
-- `deployment.yml` (2 replicas + LoadBalancer `hello-service`, label `app: hello`) and `helm-hello-kube/templates/deployment.yaml` have probes on `/healthz`; both carry the control-plane `nodeSelector`/toleration.
+- `deployment.yml` (2 replicas + NodePort `hello-service` 30500, label `app: hello`) and `helm-hello-kube/templates/deployment.yaml` have probes on `/healthz`; both carry the control-plane `nodeSelector`/toleration.
 - `helm-hello-kube/`: Deployment/Service names and the `app: hello-kube` selector are hardcoded; `helm test` works only for a release named `hello-kube`. Chart `appVersion: "1.16.0"` differs from image tag `1.0`: harmless.
 - Must stay identical across the Dockerfile usage, `deployment.yml` and `helm-hello-kube/values.yaml`: image `core.harbor.domain/python/hello:1.0`, pull secret `harbor` (`docker-registry`), port `5000`. Charts go via Helm OCI (`helm push … oci://core.harbor.domain/python/hello --ca-file ./ca.crt`), not ChartMuseum.
 

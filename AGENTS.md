@@ -1,10 +1,10 @@
 # Agent context: harbor-prod-mirror-on-kind
 
-Fork of `harbor-active-active-on-kind` @ `7279079` (2026-09-25, full history kept), itself a fork of `harbor-on-kind` @ `b65df71`. Same 14-node KinD HA Harbor lab, retargeted to mirror one specific production stand: Harbor **2.14.3** (chart `1.18.3`), **HAProxy + Keepalived** Infra LB instead of MetalLB/ingress-nginx, external PostgreSQL **15.19** instead of 18.6. Redis Sentinel, Patroni + Consul, Garage are unchanged (decisions D11–D14, `backlog.md`).
+Fork of `harbor-active-active-on-kind` @ `7279079` (itself a fork of `harbor-on-kind` @ `b65df71`; full history kept), published at https://github.com/it255ru/harbor-prod-mirror-on-kind. A 14-node KinD HA Harbor lab that mirrors one specific production stand: Harbor **2.14.3** (chart `1.18.3`), a **Keepalived + HAProxy** Infra LB, external PostgreSQL **15.19** under Patroni + Consul, Redis Sentinel, Garage S3.
 
-**P0–P6 and P3a (the `backlog.md` rewrite: fork-only now, the parent's full backlog is `git show 7279079:backlog.md`) done — the fork's plan is closed.** `hack/` deploys the target stack (Keepalived + HAProxy Infra LB, Harbor 2.14.3/chart 1.18.3, PostgreSQL 15.19) the stand was built from scratch, `make verify` gives 38 PASS / 0 FAIL and the failure tests h41–h47 passed (P5, 2026-09-25). The layout table below and the parent's feature set (Ansible `make verify`, image cache, failure tests H4.1–H4.7/h62) are inherited and correct except where P2–P4 changed them. Work `backlog.md`'s plan in order; each phase updates this file, `CLAUDE.md` and `README.md` in place as it changes something.
+**State (2026-09-25):** the plan P0–P6 in `backlog.md` is complete. The stand builds from scratch, `make verify` gives 38 PASS / 0 FAIL, and the failure tests `hack/tests/h41…h48`, `h62` were run on this stack. The parent's full backlog is `git show 7279079:backlog.md`.
 
-Where to start: `backlog.md` (Russian, source of truth: decisions D1–D17, pinned versions, success criteria, the plan P0–P6, carried-over lessons), `CLAUDE.md` (rules, pinned versions — both current-and-parent's and this fork's targets, commands, gotchas: read it before changing anything), `README.md` (human runbook; sections not yet re-measured for this stack say so), `docs/stand-topology.md` (nodes, roles, addresses, data, secrets; Russian), `docs/verification-runbook.md` (checks V1–V12 and failure-test procedures P4.1–P4.7 with the expected results measured on this stack; Russian).
+Where to start: `backlog.md` (Russian, source of truth: decisions D1–D17, pinned versions, success criteria, the plan, results, carried-over lessons), `CLAUDE.md` (rules, pinned versions, commands, gotchas: read it before changing anything), `README.md` (human runbook with the measured failure behaviour), `docs/stand-topology.md` (nodes, roles, addresses, data, secrets; Russian), `docs/verification-runbook.md` (checks V1–V12 and failure-test procedures P4.1–P4.8 with expected results measured on this stack; Russian).
 
 ## Layout
 
@@ -17,12 +17,10 @@ Where to start: `backlog.md` (Russian, source of truth: decisions D1–D17, pinn
 | `hack/install-harbor-ha.sh`, `hack/config/harbor-ha.yaml`, `hack/helm-postrender.py` | Harbor in HA: Secrets, pinned Helm chart, `preStop` post-renderer (`make harbor-ha`) |
 | `hack/install.sh` | `make infra-lb`, then `harbor-ha` (`make install`) |
 | `hack/deploy-app.sh` | Build/push the demo image, trust Harbor's CA on the node, deploy the app (`make deploy-app`) |
-| `hack/tests/` | Failure-test scripts and analyzers: `h41-push-pull.sh`, `h42-kill-during-push.sh`, `h43-rolling-update.sh`, `h44-node-loss.sh`, `h45-app-rollout.sh`, `h46-proxy-cache.sh`, `h47-role-failure.sh`, `h62-sync-mode.sh` (+ `h4x_analyze.py`) |
+| `hack/tests/` | Failure-test scripts and analyzers: `h41-push-pull.sh`, `h42-kill-during-push.sh`, `h43-rolling-update.sh`, `h44-node-loss.sh`, `h45-app-rollout.sh`, `h46-proxy-cache.sh`, `h47-role-failure.sh`, `h48-node-replace.sh`, `h62-sync-mode.sh` (+ `h4x_analyze.py`) |
 | `ansible/` | `verify.yml` + roles `verify_*` (V1..V12), `group_vars/all.yml` (numbers, addresses), `files/s3-access.sh`; run with `make verify` |
 | `hack/images.txt`, `hack/image-cache.sh` | Pinned third-party images with node roles; local cache (`~/.cache/harbor-ha`), `make images-save/load/check/status` |
 | `hack/add_host.sh` | Add the Harbor hostname to `/etc/hosts` |
-| `hack/phase0-prepare.sh` | Phase 0 host tool checks, writes `hack/phase0-baseline.log` |
-| `hack/config/harbor.yaml` | Legacy single-node Harbor values, no target uses it |
 | `python-docker-hello-kube/`, `helm-hello-kube/` | Demo app (stdlib `http.server`), Dockerfile, raw manifest and Helm chart |
 | `bin/` | Local tools (kind), gitignored |
 

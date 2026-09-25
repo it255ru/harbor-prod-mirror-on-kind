@@ -1,5 +1,4 @@
 /bin
-hack/phase0-baseline.log
 
 # Harbor registry certificate + packaged Helm charts (README teaches downloading/
 # building these into the working directory; never commit them)

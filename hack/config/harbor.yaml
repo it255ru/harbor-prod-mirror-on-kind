@@ -1,8 +1,0 @@
-expose:
-  type: ingress
-  ingress:
-    hosts:
-      core: core.harbor.domain
-    className: nginx
-
-harborAdminPassword: "Harbor12345"
