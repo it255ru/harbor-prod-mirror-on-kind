@@ -1,0 +1,20 @@
+# CoreDNS on the two lb nodes instead of the control-plane (strategic-merge patch of Deployment kube-system/coredns; `make cluster`
+# applies it, see backlog H4.11). kubeadm schedules CoreDNS on the control-plane because every worker is tainted with its role, and
+# the whole data path resolves names through it (HAProxy backends, harbor-lb.harbor-deps, consul.harbor-deps, ...): with the
+# control-plane down nothing resolved and Harbor was down. A CoreDNS on the workers keeps serving from its cache without the API.
+spec:
+  replicas: 2
+  template:
+    spec:
+      nodeSelector:
+        harbor-ha/role: lb
+      tolerations:
+        - {key: harbor-ha/role, operator: Equal, value: lb, effect: NoSchedule}
+        - {key: CriticalAddonsOnly, operator: Exists}
+        - {key: node-role.kubernetes.io/control-plane, effect: NoSchedule}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: {k8s-app: kube-dns}

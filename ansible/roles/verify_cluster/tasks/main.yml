@@ -7,12 +7,19 @@
   loop_control: {label: "{{ item.key }}"}
   register: v1_by_role
 
+- name: V1 | CoreDNS pods
+  kubernetes.core.k8s_info: {kind: Pod, namespace: kube-system, label_selectors: ["k8s-app=kube-dns"]}
+  register: v1_dns
+
 - name: V1 | record
   vars:
     ready: >-
       {{ all_nodes.resources | map(attribute='status.conditions') | map('selectattr', 'type', 'eq', 'Ready') |
          map('selectattr', 'status', 'eq', 'True') | map('list') | select | list | length }}
     actual: "{{ dict(v1_by_role.results | map(attribute='item.key') | zip(v1_by_role.results | map(attribute='resources') | map('length'))) }}"
+    dns_nodes: >-
+      {{ v1_dns.resources | selectattr('status.phase', 'eq', 'Running') | rejectattr('metadata.deletionTimestamp', 'defined') |
+         map(attribute='spec.nodeName') | list }}
     tainted: >-
       {{ all_nodes.resources | selectattr('spec.taints', 'defined') | map(attribute='spec.taints') |
          map('selectattr', 'key', 'eq', 'harbor-ha/role') | map('list') | select | list | length }}
@@ -27,5 +34,8 @@
          'd': 'actual %s, expected %s' | format(actual, expected_roles)},
         {'id': 'V1.3', 't': 'role taints on the workers',
          's': 'PASS' if tainted | int == expected_tainted_nodes else 'FAIL',
-         'd': '%s tainted, expected %s' | format(tainted, expected_tainted_nodes)}
+         'd': '%s tainted, expected %s' | format(tainted, expected_tainted_nodes)},
+        {'id': 'V1.4', 't': 'CoreDNS on two lb nodes, not on the control-plane (the data path resolves names through it, see H4.11)',
+         's': 'PASS' if (dns_nodes | length == 2 and dns_nodes | unique | length == 2 and (dns_nodes | map('extract', role_of) | unique | list) == ['lb']) else 'FAIL',
+         'd': dns_nodes | join(', ')}
       ] }}

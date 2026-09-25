@@ -26,6 +26,7 @@ cluster: kind ## Create the kind cluster (offline: `make images-load` first, the
 	if ! docker image inspect "$$img" >/dev/null 2>&1 && docker image inspect "$${img%@*}" >/dev/null 2>&1; then \
 	  echo "node image $$img not in Docker, using the cached $${img%@*}"; img="$${img%@*}"; fi; \
 	$(KIND) create cluster --name $(CLUSTER) --image "$$img" --config hack/config/kind-cluster.yaml
+	@kubectl --context kind-$(CLUSTER) -n kube-system patch deployment coredns --patch-file hack/config/coredns-ha.yaml
 
 .PHONY: cluster-delete
 cluster-delete: kind ## Delete the kind cluster.
