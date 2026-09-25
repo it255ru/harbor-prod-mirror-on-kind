@@ -2,13 +2,13 @@
 # Local cache of the third-party images and Helm charts the stand needs (backlog H5.5): a rebuild must not depend on
 # a third-party registry keeping the artifacts (MinIO's images vanished from quay.io between two builds).
 #   image-cache.sh save    pull every ref of hack/images.txt that is not cached yet (FORCE=1: all), `docker save` into the cache,
-#                          `helm pull` the three pinned charts
+#                          `helm pull` the pinned chart
 #   image-cache.sh load    put the cached images into containerd of the nodes that need them (kind load) and docker load
 #                          the `host` ones; run after `make cluster`, before `make infra-lb`
 #   image-cache.sh check   online check that every ref is still pullable anonymously (before deleting a working stand)
 #   image-cache.sh status  what is cached
 # Cache directory: $IMAGE_CACHE, default ~/.cache/harbor-ha (outside the repository, about 2 GB). Chart archives in
-# $IMAGE_CACHE/charts are preferred by install-infra.sh and install-harbor-ha.sh when present.
+# $IMAGE_CACHE/charts are preferred by install-harbor-ha.sh when present.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CACHE="${IMAGE_CACHE:-$HOME/.cache/harbor-ha}"
@@ -16,7 +16,7 @@ LIST="${IMAGE_LIST:-$HERE/images.txt}"
 CLUSTER="${CLUSTER:-harbor}"
 KIND="${KIND:-$HERE/../bin/kind}"; [ -x "$KIND" ] || KIND=kind
 CTX="kind-$CLUSTER"
-CHARTS=("metallb https://metallb.github.io/metallb metallb 0.16.1" "ingress-nginx https://kubernetes.github.io/ingress-nginx ingress-nginx 4.15.1" "harbor https://helm.goharbor.io harbor 1.19.2")
+CHARTS=("harbor https://helm.goharbor.io harbor 1.18.3")
 
 entries() { grep -vE '^\s*(#|$)' "$LIST"; }                    # "<ref> <roles>"
 slug() { echo "$1" | tr '/:@' '___'; }

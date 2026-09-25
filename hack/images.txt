@@ -8,16 +8,14 @@
 kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a  host
 # base image of the demo app (docker build in hack/deploy-app.sh) and of the Patroni image (make pg-image)
 python:3-alpine@sha256:9e9fde4d32eedce0b661d9ab91e826b62dddf28e928c230ec55f1866cac66b01  host
-postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873  host,pg,app
+postgres:15.19-alpine3.24@sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81  host,pg,app
 
-# Infra LB (make infra-lb)
-quay.io/metallb/controller:v0.16.1  lb
-quay.io/metallb/speaker:v0.16.1  lb
-quay.io/metallb/frr-k8s:v0.0.25  lb
-quay.io/frrouting/frr:10.4.3  lb
-registry.k8s.io/ingress-nginx/controller:v1.15.1@sha256:594ceea76b01c592858f803f9ff4d2cb40542cae2060410b2c95f75907d659e1  lb
-# admission webhook certificate Job of the ingress-nginx chart (runs on the lb nodes, see hack/config/nginx.yaml)
-registry.k8s.io/ingress-nginx/kube-webhook-certgen:v1.6.9@sha256:01038e7de14b78d702d2849c3aad72fd25903c4765af63cf16aa3398f5d5f2dd  lb
+# Keepalived base (docker build in `make keepalived-image`)
+alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6  host
+
+# Infra LB (D11): HAProxy + Keepalived on the lb nodes. HAProxy is the same pinned image as the Harbor LB below (role lb).
+# Keepalived is our own image (D14): the Alpine base above + `apk add keepalived=2.3.4-r2`; the built image
+# (harbor-ha/keepalived) is loaded by `make keepalived-image`, not cached here (like the Patroni image).
 
 # dependencies (make ha-deps); the Verify job V9 also runs postgres and valkey on the app nodes
 hashicorp/consul:1.22.7@sha256:a230dcea0bb107bd7958a912d1429fb7f9d399637de7ffb814b34412b9e8c543  consul
@@ -25,10 +23,11 @@ valkey/valkey:9.0.6-alpine3.24@sha256:187679e3bd4036959631e3f03983ab2ba503ab21e6
 haproxy:3.4.4-alpine3.24@sha256:52c5921e1619f39cbd5b25e1b4b5847667917f39745056cf004d9c263fbf11b9  lb
 dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020  s3
 
-# Harbor 2.15.2 (make harbor-ha)
-goharbor/harbor-core:v2.15.2  app
-goharbor/harbor-jobservice:v2.15.2  app
-goharbor/harbor-portal:v2.15.2  app
-goharbor/harbor-registryctl:v2.15.2  app
-goharbor/registry-photon:v2.15.2  app
-goharbor/trivy-adapter-photon:v2.15.2  app
+# Harbor 2.14.3, chart 1.18.3 (make harbor-ha; digests verified 2026-09-25, see backlog.md)
+goharbor/harbor-core:v2.14.3@sha256:a30e5a8be3d94b6485e7fdd4ed7fdf9e9724ee0a6d103b3804aacf6784ee358e  app
+goharbor/harbor-jobservice:v2.14.3@sha256:e2b0298e894d725d68954b786c61c5dd607114f6129534756c8f7985124c07a6  app
+goharbor/nginx-photon:v2.14.3@sha256:e31b5290e31938fde76590e4f5d7b8eb3d8038ad1485879bdad7a480538dc858  app
+goharbor/harbor-portal:v2.14.3@sha256:2556b6c7dd832bf22ed8b177245fa5fbcd70255959e69c5d0fbe2153f4bd2243  app
+goharbor/harbor-registryctl:v2.14.3@sha256:ddf6bb429eb6b5a3db3e98bfe6ab3dd2567ebb35547836d87fc54ddacebfac8d  app
+goharbor/registry-photon:v2.14.3@sha256:6533fc396cbce57131053faec55e1bd1da8b92aed318410c203ff1c7a9b910ab  app
+goharbor/trivy-adapter-photon:v2.14.3@sha256:5c6f7162804cd94d41672a694579f136ccc9730d024dda9ad24e0f42bdae6f36  app
