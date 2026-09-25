@@ -2,7 +2,7 @@
 
 Fork of [harbor-active-active-on-kind](https://github.com/it255ru/harbor-active-active-on-kind) (@ `7279079`, 2026-09-25, full history kept, not pushed anywhere) aimed at one specific production stand rather than the parent's general HA scheme: Harbor **2.14.3** (chart `1.18.3`, not 2.15.2/1.19.2), **HAProxy + Keepalived** as the Infra LB (not MetalLB/ingress-nginx), external PostgreSQL downgraded to **15.19** (not 18.6). Redis Sentinel, Patroni + Consul and Garage are unchanged from the parent — decisions D11-D14 in [backlog.md](backlog.md).
 
-**Status:** fork just created, target versions pinned — the plan is `backlog.md`'s P0-P6 list, not yet executed beyond P0. Until P1-P6 land, everything below this line still describes the **parent's** stand as it existed at the fork point (Harbor 2.15.2, MetalLB+ingress-nginx, PostgreSQL 18.6) — read it as history, not as what `make cluster && make install` currently gives you on *this* fork's intended architecture; the `hack/` code hasn't changed yet. Node/address map: [docs/stand-topology.md](docs/stand-topology.md). Check-by-check procedure: [docs/verification-runbook.md](docs/verification-runbook.md).
+**Status:** P0-P4 done: Infra LB = Keepalived + HAProxy (no MetalLB/ingress-nginx), Harbor 2.14.3 / chart 1.18.3 exposed through the chart's nginx (`expose.type: clusterIP`), PostgreSQL 15.19. Built from scratch and tested on 2026-09-25: `make verify` — 38 PASS / 0 FAIL; the failure tests (`hack/tests/`) passed (`h62` not run), the table below is measured on this stack. Below this line, anything about MetalLB, ingress-nginx, measured failover timings, Harbor 2.15.2 or PostgreSQL 18 still describes the **parent's** stand as it existed at the fork point (Harbor 2.15.2, MetalLB+ingress-nginx, PostgreSQL 18.6) — read it as history, not as what `make cluster && make install` currently gives you on *this* fork's intended architecture; the `hack/` code hasn't changed yet. Node/address map: [docs/stand-topology.md](docs/stand-topology.md). Check-by-check procedure: [docs/verification-runbook.md](docs/verification-runbook.md).
 
 ## Architecture
 
@@ -11,14 +11,14 @@ Fork of [harbor-active-active-on-kind](https://github.com/it255ru/harbor-active-
 | Role | Nodes | Runs |
 |------|-------|------|
 | app | 2 | Harbor core, portal, registry, jobservice (2 replicas each) and Trivy (1) |
-| lb | 2 | HAProxy "Harbor LB" (PostgreSQL and Redis entry point), ingress-nginx x2, MetalLB |
+| lb | 2 | HAProxy "Harbor LB" (PostgreSQL and Redis entry point); Infra LB: Keepalived (VIP) + HAProxy on every lb node |
 | pg | 2 | PostgreSQL 18 under Patroni |
 | redis | 3 | Valkey with a Sentinel sidecar (1 master, 2 replicas) |
 | consul | 3 | Consul servers, the DCS for Patroni |
 | s3 | 1 | Garage, stands in for Ceph RGW (registry blobs) |
 
 ```text
-client -> 172.20.0.100 (MetalLB) -> ingress-nginx -> Harbor (app) -> HAProxy (Harbor LB) -> PostgreSQL primary / Redis master
+client -> 172.20.0.100 (Keepalived VIP) -> HAProxy (Infra LB, TCP) -> Harbor nginx (app) -> core/registry -> HAProxy (Harbor LB) -> PostgreSQL primary / Redis master
                                                               \-> Garage (S3 blobs)        PostgreSQL state -> Consul
 ```
 
@@ -47,10 +47,9 @@ Everything is pinned; changing a pin means updating the manifests, this table, `
 |-----------|---------|
 | Kind CLI | `v0.30.0` |
 | KinD node image | `kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a` |
-| MetalLB chart | `0.16.1` |
-| ingress-nginx chart | `4.15.1` (app `1.15.1`) |
-| Harbor chart / app | `1.19.2` / `2.15.2` |
-| PostgreSQL | `18.6-alpine3.24` |
+| Keepalived | `2.3.4-r2` on `alpine:3.24@sha256:294b683c…` (own image, D14) |
+| Harbor chart / app | `1.18.3` / `2.14.3` |
+| PostgreSQL | `15.19-alpine3.24` |
 | Patroni | `4.1.5` |
 | Consul | `1.22.7` |
 | HAProxy | `3.4.4-alpine3.24` |
@@ -61,15 +60,15 @@ Everything is pinned; changing a pin means updating the manifests, this table, `
 
 ```bash
 make cluster       # 14-node kind cluster "harbor" from hack/config/kind-cluster.yaml, context kind-harbor
-make infra-lb      # MetalLB + ingress-nginx x2 on the lb nodes
+make infra-lb      # builds the Keepalived image, DaemonSet infra-lb (Keepalived VIP + HAProxy) on the lb nodes
 make ha-deps       # consul -> postgres -> redis -> harbor-lb -> s3, in this order
 make add-host      # "172.20.0.100 core.harbor.domain" in /etc/hosts (sudo, once)
-make harbor-ha     # Harbor 1.19.2 in HA mode; DRY_RUN=1 only renders against the cluster
+make harbor-ha     # Harbor 1.18.3 (2.14.3) in HA mode; DRY_RUN=1 only renders against the cluster
 make deploy-app    # project "python", demo image build/push, CA trust on the node, pull secret, demo app
 make cluster-delete
 ```
 
-**Image cache (optional, recommended).** Every third-party image and chart is pinned, but a registry can still be slow or drop an artifact (MinIO's images vanished, Docker Hub can take minutes per image). `make images-save` keeps the 19 images of `hack/images.txt` and the three charts in `~/.cache/harbor-ha` (`IMAGE_CACHE=<dir>` to move it; about 4 GB, outside the repository); `make images-load` puts each image into containerd of only the nodes that need it. With a cache the build is `make images-load cluster images-load infra-lb ha-deps ...` (the first `images-load` prepares the Docker daemon, the second the nodes; `make cluster` uses the cached node image when the pinned one is absent). `make images-check` tells whether the originals are still pullable. Not cached: PyPI packages of the Patroni image and the `FROM` base images of the two local builds, which Docker cannot hold by digest after a load.
+**Image cache (optional, recommended).** Every third-party image and chart is pinned, but a registry can still be slow or drop an artifact (MinIO's images vanished, Docker Hub can take minutes per image). `make images-save` keeps the 15 images of `hack/images.txt` and the Harbor chart `1.18.3` in `~/.cache/harbor-ha` (`IMAGE_CACHE=<dir>` to move it; outside the repository); `make images-load` puts each image into containerd of only the nodes that need it. With a cache the build is `make images-load cluster images-load infra-lb ha-deps ...` (the first `images-load` prepares the Docker daemon, the second the nodes; `make cluster` uses the cached node image when the pinned one is absent). `make images-check` tells whether the originals are still pullable. Not cached: PyPI packages of the Patroni image and the `FROM` base images of the two local builds, which Docker cannot hold by digest after a load.
 
 `make install` runs `infra-lb` and `harbor-ha`. Every target is idempotent. The order of `ha-deps` matters (Patroni needs Consul, HAProxy needs the PostgreSQL and Redis backends). `make help` lists all targets; variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOCALBIN`, `PG_IMAGE`.
 
@@ -97,8 +96,7 @@ pods by node (which pod is where inside a role varies between builds):
 harbor-control-plane   hello-deployment x2 (demo app)
 harbor-worker          harbor-core, harbor-jobservice, harbor-portal, harbor-registry
 harbor-worker2         harbor-core, harbor-jobservice, harbor-portal, harbor-registry, harbor-trivy-0
-harbor-worker3         harbor-lb, ingress-nginx-controller, metallb-speaker, metallb-frr-k8s
-harbor-worker4         harbor-lb, ingress-nginx-controller, metallb-controller, metallb-speaker, metallb-frr-k8s
+harbor-worker3/4       harbor-lb, infra-lb (haproxy + keepalived)
 harbor-worker5/6       pg-0, pg-1            harbor-worker7/8/9    redis-0, redis-1, redis-2
 harbor-worker10/11/12  consul-0, consul-1, consul-2              harbor-worker13   garage-0
 
@@ -141,17 +139,19 @@ The failure tests are scripts in `hack/tests/`. They run real load, kill real no
 
 ## Failure behaviour (measured)
 
+Measured on this stack (Harbor 2.14.3, PostgreSQL 15.19, Keepalived + HAProxy), 2026-09-25, one run per case; details in [backlog.md](backlog.md) → P5.
+
 | Failure | What clients see | Data |
 |---------|------------------|------|
-| Replica of core/registry killed during a push | one 502, the client retries, the push completes | intact |
-| Rolling update of core/registry/portal | no errors (`preStop` sleep, see below) | intact |
-| `app` node lost | requests stall up to ~10 s (a `docker pull` up to ~30 s) for ~50 s until Kubernetes declares the node lost, then normal; one in-flight 502 possible; Trivy is down until the node is back | intact |
-| Consul leader node | nothing visible; a ~3 s blip of PostgreSQL writes while raft elects a leader | intact |
-| Redis master node | ~21 s without Redis: requests through Harbor stall but succeed | no acknowledged write lost |
-| PostgreSQL primary node | ~33 s without writes, ~16 s of 5xx for requests that need the database | none lost in the tests, but replication is asynchronous: a write not yet on the replica can be lost |
-| `lb` node that announces the Infra LB address | the address is unreachable ~36 s while MetalLB moves the announcement, and again ~8 s when the node returns | intact |
+| Replica of core/registry killed during a push | 1-2 x 502, the client retries, the push completes | intact |
+| Rolling update of core/registry (`preStop` sleep, see below) | no errors (0 of 318 manifests, 114 blobs, 241 pulls) | intact |
+| `app` node lost (nginx, core, portal, registry, jobservice, Trivy) | for ~52 s until Kubernetes declares the node lost some requests hang up to 30 s (the client timeout), then normal: 3 of 1929 manifests, 3 of 701 blobs, 1 of 1146 pulls failed; Trivy is down until the node is back. nginx reaches core/registry through Services, which keep a dead pod's endpoint until NotReady | intact |
+| Consul leader node | nothing visible (0 errors); raft elects a new leader | intact |
+| Redis master node | ~21-25 s without Redis: requests stall up to 21 s, 1 of 38 pushes failed; core/jobservice are **not** restarted | no acknowledged write lost |
+| PostgreSQL primary node | ~33 s without writes, 5xx for requests that need the database (122 of 690 manifests, 37 of 243 blobs, 1 of 32 pushes; 0 of 623 pulls) | none lost in the test, but replication is asynchronous |
+| `lb` node that holds the Infra LB address (VIP) | the VIP moves to the other node: 2 of 621 manifests failed, longest gap 5.2 s, 0 pull/push failures; no second blip when the node returns (`nopreempt`); new connections to PostgreSQL/Redis through the dead HAProxy fail (19 of 421 / 24 of 442) | intact |
 
-The windows come from settings: Kubernetes ~45-55 s to declare a node lost, Sentinel `down-after` 15 s, Patroni TTL 30 s, MetalLB L2 failover. After the node returns everything is healthy again on its own within about a minute.
+The windows come from settings: Kubernetes ~47-52 s to declare a node lost, Sentinel `down-after` 15 s, Patroni TTL 30 s, VRRP failover of the Infra LB address. After the node returns everything is healthy again on its own within about a minute.
 
 ## Design notes and gotchas
 
@@ -194,7 +194,7 @@ Docker picks the subnet of the `kind` network per machine. After `make cluster`:
 docker network inspect -f '{{.IPAM.Config}}' kind
 ```
 
-The defaults assume `172.20.0.0/16`. If yours differs, update together: `LB_IP` in `Makefile`, `hack/config/lb-ipaddresspool.yaml`, `hack/config/nginx.yaml`, host `/etc/hosts` and the node's `/etc/hosts`. `hack/add_host.sh` skips the entry if the hostname already exists, so it will not correct a wrong IP.
+The defaults assume `172.20.0.0/16`. If yours differs, update together: `LB_IP` in `Makefile`, `virtual_ipaddress` in `hack/ha/infra-lb.yaml`, host `/etc/hosts` and the node's `/etc/hosts`. `hack/add_host.sh` skips the entry if the hostname already exists, so it will not correct a wrong IP.
 
 ## What `make deploy-app` does
 
@@ -213,7 +213,7 @@ Manual CA fetch, if needed: `curl -sk https://core.harbor.domain/api/v2.0/system
 `python-docker-hello-kube/hello.py` is stdlib-only (`http.server`, no pip dependencies), port 5000: `GET /` returns `Hello, Kube! (from <pod hostname>)` (shows which replica answered), `GET /healthz` returns `ok` (probe target).
 
 ```bash
-kubectl apply -f deployment.yml                 # 2 replicas + LoadBalancer Service hello-service (172.20.0.101)
+kubectl apply -f deployment.yml                 # 2 replicas + NodePort Service hello-service (<control-plane IP>:30500)
 helm install hello-kube ./helm-hello-kube       # the release must be named hello-kube for `helm test`
 ```
 
@@ -230,7 +230,7 @@ helm install hello-kube oci://core.harbor.domain/python/hello/hello-kube --versi
 
 More in the runbook. Short list:
 
-- A `LoadBalancer` IP does not respond (ARP `(incomplete)`, MetalLB speaker flapping `serviceAnnounced`/`serviceWithdrawn`): check `kubectl get endpoints <svc>` and pod status first; MetalLB does not hold an announcement for a Service without Ready endpoints.
+- `172.20.0.100` does not respond: find the holder (`docker exec <lb node> ip -4 addr show eth0`), then `kubectl -n harbor-deps logs ds/infra-lb -c keepalived` (VRRP state) and the HAProxy backends (`docker exec <lb node> curl -s 'http://127.0.0.1:8405/stats;csv'`; `harbor_https` needs an UP nginx pod). Parent's MetalLB note, kept for history: MetalLB did not hold an announcement for a Service without Ready endpoints.
 - `make` fails even for `make help`: Go must be on `PATH` (the Makefile runs `go env GOBIN` at parse time).
 - After bumping `KIND_VERSION`, delete `./bin/kind`, otherwise Make will not reinstall it.
 - Kind clusters are not upgraded in place: `make cluster-delete`, then `make cluster`.

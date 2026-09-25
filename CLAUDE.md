@@ -2,12 +2,12 @@
 
 Repo: **harbor-prod-mirror-on-kind**. Fork of `harbor-active-active-on-kind` @ `7279079` (2026-09-25, full history kept, `origin` unset — not pushed anywhere yet), which is itself a fork of `harbor-on-kind` @ `b65df71`. Same 14-node KinD HA lab, but aimed at mirroring one specific production stand instead of the parent's general HA scheme: Harbor **`2.14.3`** (not 2.15.2), HAProxy **+ Keepalived** as the Infra LB (not MetalLB/ingress-nginx), external PostgreSQL downgraded to **`15.19`** (not 18.6) to match what chart `1.18.3` documents. Redis Sentinel, Patroni + Consul, Garage stay as in the parent (D11–D14, `backlog.md`).
 
-**Status:** fork just created (P0) — decisions and versions are pinned in `backlog.md`, but **the code under `hack/` and `hack/config/` is still byte-for-byte the parent's**: `make cluster/infra-lb/ha-deps/harbor-ha` right now still deploy MetalLB+ingress-nginx, Harbor chart 1.19.2, PostgreSQL 18.6, exactly like the parent. Nothing in this paragraph is done until backlog.md's P1–P6 tick `[x]`. Everything the parent's CLAUDE.md said about Phases 0–4/H5.x/Phase 6 is still true of the inherited code, and is not repeated here — see `backlog.md`'s "Унаследовано от родителя" section.
+**Status:** P0–P5, P3a (the `backlog.md` rewrite: it now describes this fork only, the parent's full backlog is `git show 7279079:backlog.md`) done, P6 open. **P5 is done (2026-09-25): the stand was built from scratch, `make verify` gives 38 PASS / 0 FAIL, and the failure tests in `hack/tests/` (h41-h47) passed on this stack (`h62` not run); measured timings are in `backlog.md` → P5 and the README table.** The running cluster of the parent repo was deleted at the user's request. `hack/images.txt` / `CHARTS` (chart `1.18.3`) match what `hack/` deploys now. Everything the parent's CLAUDE.md said about Phases 0–4/H5.x/Phase 6 is still true of the inherited code, and is not repeated here — see `backlog.md`'s "Унаследовано от родителя" section.
 
 ## Rules
 
-- Work `backlog.md`'s **P0–P6 plan** in order and tick `- [ ]` → `- [x]` when an item is finished, with the result recorded there. The inherited Phase 0–4/H5.x/Phase 6 items below "Унаследовано от родителя" are already closed history from the parent; don't re-do them, but the code they describe is what P1–P6 will change.
-- **Ask when a new decision appears, do not pick silently.** This fork's own decisions are D11–D14 in `backlog.md` (Keepalived replaces Infra LB, Harbor 2.14.3/chart 1.18.3 with the official image since the vendor build `v2.14.3-fa517e2a` is unreachable, PostgreSQL downgraded to 15.19, own minimal Keepalived image). Inherited from the parent: D1 14 nodes (1 control-plane + app×2, lb×2, pg×2, redis×3, consul×3, s3×1), D2 Patroni + Consul, D3 Redis Sentinel (an *assumption*, the prod mode is unknown — this fork confirms Sentinel matches prod), D4/D4a S3 = Garage, D5 one lab cluster at a time, D6 two-stage success, D7 HAProxy as Harbor LB (its own note that prod likely uses keepalived for the shared address is exactly what D11 now implements), D8 minimum scope, D9/D10 colors ignored and Nexus out of scope.
+- Work `backlog.md`'s **P0–P6 plan** in order and tick `- [ ]` → `- [x]` when an item is finished, with the result recorded there. The parent's Phase 0–6/H-items are closed history (`git show 7279079:backlog.md`; the lessons that still apply are in `backlog.md` → "Что унаследовано"); don't re-do them.
+- **Ask when a new decision appears, do not pick silently.** This fork's own decisions are D11–D16 in `backlog.md` (D11 Keepalived + HAProxy replace the Infra LB; D12 Harbor 2.14.3/chart 1.18.3 with the official image (its version string is `v2.14.3-fa517e2a`, exactly what prod shows: `fa517e2a` is the git commit, not a vendor build); D13 PostgreSQL 15.19; D14 own minimal Keepalived image; D15 Harbor exposed through the chart's nginx, no Ingress; D16 one hostNetwork DaemonSet `infra-lb`; D14–D16 are the plan author's calls, open to revision). Inherited from the parent: D1 14 nodes (1 control-plane + app×2, lb×2, pg×2, redis×3, consul×3, s3×1), D2 Patroni + Consul, D3 Redis Sentinel (an *assumption*, the prod mode is unknown — this fork confirms Sentinel matches prod), D4/D4a S3 = Garage, D5 one lab cluster at a time, D6 two-stage success, D7 HAProxy as Harbor LB (its own note that prod likely uses keepalived for the shared address is exactly what D11 now implements), D8 minimum scope, D9/D10 colors ignored and Nexus out of scope.
 - **Don't invent versions.** Every new component gets an explicit pinned version (and image digest) recorded in `backlog.md`, `README.md` and the table below **before** it is installed. Verify Harbor chart keys with `helm show values harbor/harbor --version 1.18.3` (not `1.19.2` — that's the parent's), not from memory.
 - Target architecture: Harbor app ×2 → Harbor LB ×2 (HAProxy, in front of PostgreSQL and Redis, **not** the Harbor ingress) → PostgreSQL ×2 under Patroni with state in Consul ×3, Redis ×3; blobs in S3 (Ceph in prod, Garage here); Infra LB **HAProxy + Keepalived (D11; replaces the parent's ingress-nginx + MetalLB)** in front. Backups, Prometheus and Nexus are out of scope.
 - **One lab cluster at a time (D5, inherited):** the defaults (`CLUSTER=harbor`, `LB_IP=172.20.0.100`, pool `172.20.0.100–110`) match both `harbor-on-kind` and the parent — so only one of the **three** repos' clusters can run at a time now; `make cluster-delete` whichever of the other two is up before `make cluster` here. The host's `/etc/hosts` entry and Docker `insecure-registries` for `core.harbor.domain` are reused.
@@ -26,25 +26,23 @@ Repo: **harbor-prod-mirror-on-kind**. Fork of `harbor-active-active-on-kind` @ `
 |-----------|----------------|
 | Kind CLI | `v0.30.0` |
 | Node image | `kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a` |
-| MetalLB chart | `0.16.1` — **to be removed in P2 (D11)** |
-| ingress-nginx chart | `4.15.1` (app `1.15.1`) — **to be removed in P2 (D11)** |
-| Harbor chart / app | `1.19.2` / `2.15.2` — **to become `1.18.3` / `2.14.3` in P3 (D12)** |
-| PostgreSQL | `18.6-alpine3.24` (Harbor 2.15.2 bundles 18.3) — **to become `15.19-alpine3.24` in P4 (D13)** |
+| Keepalived | `2.3.4-r2` on `alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6` — own image (D14, P2); MetalLB and ingress-nginx are removed |
+| Harbor chart / app | `1.18.3` / `2.14.3`, images pinned by digest in `hack/config/harbor-ha.yaml` (D12, P3) |
+| PostgreSQL | `15.19-alpine3.24@sha256:f7d23353…` (Harbor 2.14.3/chart 1.18.3 documents 15.12; D13, P4) |
 | Patroni | `4.1.5` (PyPI, own image, extras `consul`, `psycopg3`) — unchanged |
 | Consul | `1.22.7` (not 2.0.x) — unchanged |
-| HAProxy | `3.4.4-alpine3.24` (LTS) — unchanged pin, but gets a second role (Infra LB) in P2 |
+| HAProxy | `3.4.4-alpine3.24` (LTS) — unchanged pin, second role (Infra LB, P2) |
 | Valkey + Sentinel | `9.0.6-alpine3.24` (Harbor bundles 9.0.3) — unchanged |
 | Garage (S3) | `v2.4.1` (Docker Hub `dxflrs/garage`) — unchanged |
-| Keepalived | not yet picked — **P2, D14: own minimal Alpine + `apk add keepalived` image, not a third-party one** |
 
-Images are also pinned by digest in the manifests; full refs and rationale are in `backlog.md` → "Версии компонентов HA" (parent) and "Закреплённые версии" (this fork's changes). Chart `1.19.2` HA keys in use: `database.type` / `redis.type: external` + `*.external.*`, `persistence.imageChartStorage.type: s3` (`disableredirect: true`), `replicas`, `nodeSelector`, `tolerations`, `topologySpreadConstraints`, `livenessProbe` under `core`/`portal`/`registry`/`jobservice`/`trivy`, `expose.tls.certSource: secret`, `caSecretName`. **P3 gotcha, already confirmed against chart `1.18.3`:** `core.livenessProbe`/`readinessProbe` and `jobservice.livenessProbe`/`readinessProbe` are not values-configurable in `1.18.3` (hardcoded in the templates: core `failureThreshold: 2`, jobservice `initialDelaySeconds: 300`, neither has a settable `timeoutSeconds`) — the parent's H4.7 relaxed-liveness fix must move from `hack/config/harbor-ha.yaml` into `hack/helm-postrender.py` instead, or it silently does nothing and core/jobservice restart during a Redis failover again.
+Images are also pinned by digest in the manifests; full refs and rationale are in `backlog.md` → "Версии компонентов HA" (parent) and "Закреплённые версии" (this fork's changes). Chart `1.18.3` HA keys in use: `database.type` / `redis.type: external` + `*.external.*`, `persistence.imageChartStorage.type: s3` (`disableredirect: true`), `replicas`, `nodeSelector`, `tolerations`, `topologySpreadConstraints`, `livenessProbe` under `core`/`portal`/`registry`/`jobservice`/`trivy`, `expose.tls.certSource: secret`, `caSecretName`. **Chart `1.18.3` gaps (P3), handled in `hack/helm-postrender.py`:** no values for `podDisruptionBudget` (the post-renderer adds 5 PDBs) and for `core`/`jobservice` `livenessProbe` (hardcoded in the templates; the H4.7 relaxed liveness `timeoutSeconds 5` / `failureThreshold 6` is patched in, otherwise core/jobservice restart during a Redis failover). The chart's `trivy-sts.yaml` has a TAB that PyYAML rejects: the post-renderer strips trailing blanks first. Harbor is exposed through the chart's nginx (`expose.type: clusterIP`, D15), so its image `goharbor/nginx-photon` is pinned too.
 
 ## Commands
 
 ```bash
 make help            # list targets
 make cluster         # installs ./bin/kind if missing, creates the 14-node cluster "harbor" (hack/config/kind-cluster.yaml, context kind-harbor)
-make infra-lb        # MetalLB + ingress-nginx x2 on the lb nodes (hack/install-infra.sh)
+make infra-lb        # keepalived-image + DaemonSet infra-lb: Keepalived VIP + HAProxy on the lb nodes (hack/ha/infra-lb.yaml)
 make ha-deps         # consul -> postgres -> redis -> harbor-lb -> s3, in this order; each can run alone
                      #   consul | pg-image | postgres | redis | harbor-lb | s3   (hack/ha/*.yaml, namespace harbor-deps, secrets generated on first run)
 make add-host        # "$LB_IP $HARBOR_HOST" into /etc/hosts (sudo)
@@ -66,11 +64,11 @@ Variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOC
 
 - The Makefile runs `go env GOBIN` at parse time: Go must be on `PATH` even for `make help`. `$(KIND)` is a file target: after bumping `KIND_VERSION` delete `./bin/kind`. Kind clusters are never upgraded in place.
 - `hack/add_host.sh` skips the entry if the hostname is present (it will not fix a wrong IP). Use `systemctl reload docker`, not `restart`, while a cluster runs.
-- The subnet of the Docker `kind` network varies per machine (`docker network inspect kind`; here `172.20.0.0/16`). Changing `LB_IP` means updating together: `Makefile`, `hack/config/lb-ipaddresspool.yaml`, `hack/config/nginx.yaml`, host `/etc/hosts`, the node's `/etc/hosts`, README examples.
+- The subnet of the Docker `kind` network varies per machine (`docker network inspect kind`; here `172.20.0.0/16`). Changing `LB_IP` means updating together: `Makefile`, `virtual_ipaddress` in `hack/ha/infra-lb.yaml`, host `/etc/hosts`, the node's `/etc/hosts`, README examples.
 - Everything shares one host disk: gigabytes of writes (image builds with `dd`, big pushes) stall etcd/apiserver, crash controller-manager/scheduler (leader election; lease 60/40/10 s is set in `kind-cluster.yaml`) and trigger Sentinel failovers (`down-after` 15000). Keep test data small.
 - Image cache (`hack/image-cache.sh`): `docker save` drops the name of a digest-pinned image, so images are saved under `cache.local/...:cached` and re-tagged inside the node with `ctr -n k8s.io images tag` to the pinned name; do not replace this with a plain `kind load docker-image`.
 - Cold-start image pulls fail transiently (`ErrImagePull`): pods self-heal. Third-party images can vanish (MinIO). The output of `make pg-image` is loaded with `kind load` into the `pg` nodes only and disappears with the cluster.
-- MetalLB L2: if a `LoadBalancer` IP never resolves (ARP `(incomplete)`, speaker flapping `serviceAnnounced`/`serviceWithdrawn`), check `kubectl get endpoints <svc>` and pod status first.
+- Infra LB (P2): `infra-lb` is a hostNetwork DaemonSet (Keepalived + HAProxy on :80/:443/127.0.0.1:8405). Keepalived is `nopreempt` on both nodes and drops the VIP when the local HAProxy `/healthz` fails; HAProxy backends are the Harbor nginx pods via the headless Service `harbor-nginx-headless` (needs `make harbor-ha` to have any). **Their health check must stay TCP + TLS handshake (`check-ssl`), never an HTTP request through nginx** (`/api/v2.0/ping` goes nginx → core via a Service; while a dead core pod is still an endpoint it hangs on a healthy nginx too and HAProxy switches off both — a full outage when an `app` node dies, found in `h44`). `keepalived.conf` must not be executable (set ConfigMap file modes per item). The keepalived image is built locally (`make keepalived-image`), `imagePullPolicy: Never`, disappears with the cluster. No Service is `LoadBalancer` any more: the demo app is a NodePort (30500) on the control-plane.
 
 **Harbor chart, TLS, rollouts**
 
@@ -95,13 +93,13 @@ Variables: `CLUSTER`, `KIND_IMAGE`, `KIND_VERSION`, `LB_IP`, `HARBOR_HOST`, `LOC
 
 ## Coupling of the entry path
 
-**Still the parent's diagram — this is exactly what P2 (D11) replaces with Keepalived + HAProxy.** Update in place once P2 lands.
+**Since P2 (D11/D15/D16):**
 
 ```
 host: /etc/hosts core.harbor.domain -> 172.20.0.100
-  MetalLB L2 pool 172.20.0.100-110 (hack/config/lb-ipaddresspool.yaml)
-  ingress-nginx x2 on the lb nodes, Service pinned to 172.20.0.100 (hack/config/nginx.yaml, metallb.universe.tf/loadBalancerIPs)
-  Harbor (expose.type=ingress, className nginx, host core.harbor.domain, TLS from Secret harbor-ha-ingress-tls) - hack/config/harbor-ha.yaml
+  Keepalived VRRP VIP 172.20.0.100/16 on eth0 of one lb node (hack/ha/infra-lb.yaml, both nodes BACKUP+nopreempt)
+  HAProxy (same pod, hostNetwork) :443/:80 TCP passthrough -> Harbor nginx pods (harbor-nginx-headless, port 8443/8080, TLS from Secret harbor-ha-ingress-tls)
+  Harbor (expose.type=clusterIP, chart nginx x2 on the app nodes) - hack/config/harbor-ha.yaml
 ```
 
 Registry trust outside `deploy-app`: host Docker `insecure-registries: ["core.harbor.domain"]`; for the node, fetch `ca.crt` (`curl -sk https://core.harbor.domain/api/v2.0/systeminfo/getcert`), `docker cp` it to `<cluster>-control-plane:/usr/local/share/ca-certificates/`, `update-ca-certificates`, add the hosts entry, `systemctl restart containerd`.
@@ -115,6 +113,6 @@ Registry trust outside `deploy-app`: host Docker `insecure-registries: ["core.ha
 
 ## Conventions
 
-- Always pass `--version` to every `helm upgrade -i` (`hack/install-infra.sh`, `hack/install-harbor-ha.sh`, any new script). Prefer `make` targets over ad-hoc kind/helm commands.
+- Always pass `--version` to every `helm upgrade -i` (`hack/install-harbor-ha.sh`, any new script). Prefer `make` targets over ad-hoc kind/helm commands.
 - Don't commit `bin/`, `ca.crt`, `*.tgz` or real credentials (`admin` / `Harbor12345` is the lab-only default); generated passwords live only in Secrets. `.gitignore` covers the files.
 - Keep `README.md` and `AGENTS.md` in sync with `Makefile` / `hack/` whenever pins, topology or the demo app change.

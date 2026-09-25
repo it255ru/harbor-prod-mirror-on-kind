@@ -2,9 +2,9 @@
 
 Fork of `harbor-active-active-on-kind` @ `7279079` (2026-09-25, full history kept), itself a fork of `harbor-on-kind` @ `b65df71`. Same 14-node KinD HA Harbor lab, retargeted to mirror one specific production stand: Harbor **2.14.3** (chart `1.18.3`), **HAProxy + Keepalived** Infra LB instead of MetalLB/ingress-nginx, external PostgreSQL **15.19** instead of 18.6. Redis Sentinel, Patroni + Consul, Garage are unchanged (decisions D11–D14, `backlog.md`).
 
-**As of the fork point, `hack/` is still byte-for-byte the parent's** — the layout table below and the parent's whole feature set (Ansible `make verify`, image cache, failure tests H4.1–H4.7/h62) are inherited and correct, but describe the *parent's* architecture (2.15.2, MetalLB, PG 18.6) until `backlog.md`'s P1–P6 plan lands. Work that plan in order; each phase updates this file, `CLAUDE.md` and `README.md` in place as it changes something.
+**P0–P5 and P3a (the `backlog.md` rewrite: fork-only now, the parent's full backlog is `git show 7279079:backlog.md`) done, P6 open.** `hack/` deploys the target stack (Keepalived + HAProxy Infra LB, Harbor 2.14.3/chart 1.18.3, PostgreSQL 15.19) the stand was built from scratch, `make verify` gives 38 PASS / 0 FAIL and the failure tests h41–h47 passed (P5, 2026-09-25). The layout table below and the parent's feature set (Ansible `make verify`, image cache, failure tests H4.1–H4.7/h62) are inherited and correct except where P2–P4 changed them. Work `backlog.md`'s plan in order; each phase updates this file, `CLAUDE.md` and `README.md` in place as it changes something.
 
-Where to start: `backlog.md` (Russian: this fork's own plan P0–P6 and decisions D11–D14 at the top, the parent's full inherited history below "Унаследовано от родителя" — source of truth), `CLAUDE.md` (rules, pinned versions — both current-and-parent's and this fork's targets, commands, gotchas: read it before changing anything), `README.md` (human runbook, currently describing the parent's stand), `docs/stand-topology.md` (nodes, roles, addresses, data, secrets — parent's, to be updated once the Infra LB changes; Russian), `docs/verification-runbook.md` (checks V1–V12 and failure-test procedures P4.1–P4.7 — parent's; Russian).
+Where to start: `backlog.md` (Russian, source of truth: decisions D1–D16, pinned versions, success criteria, the plan P0–P6, carried-over lessons), `CLAUDE.md` (rules, pinned versions — both current-and-parent's and this fork's targets, commands, gotchas: read it before changing anything), `README.md` (human runbook; sections not yet re-measured for this stack say so), `docs/stand-topology.md` (nodes, roles, addresses, data, secrets — parent's, to be updated once the Infra LB changes; Russian), `docs/verification-runbook.md` (checks V1–V12 and failure-test procedures P4.1–P4.7 — parent's; Russian).
 
 ## Layout
 
@@ -12,10 +12,10 @@ Where to start: `backlog.md` (Russian: this fork's own plan P0–P6 and decision
 |------|------|
 | `Makefile` | Cluster lifecycle and install entry points (`make help`) |
 | `hack/config/kind-cluster.yaml` | 14-node topology; role label/taint `harbor-ha/role`, leader-election tuning |
-| `hack/install-infra.sh`, `hack/config/{metallb,nginx,lb-ipaddresspool}.yaml` | Infra LB: MetalLB + ingress-nginx x2 on the `lb` nodes (`make infra-lb`) |
+| `hack/ha/infra-lb.yaml`, `hack/ha/keepalived/` | Infra LB (P2): DaemonSet on the `lb` nodes, Keepalived VIP + HAProxy TCP passthrough to the Harbor nginx pods; own Keepalived image (`make infra-lb`) |
 | `hack/ha/` | Dependencies in namespace `harbor-deps`: `consul.yaml`, `postgres.yaml` + `patroni/` (image build), `redis.yaml`, `haproxy.yaml`, `s3.yaml` + `s3-init.sh` (`make ha-deps`) |
 | `hack/install-harbor-ha.sh`, `hack/config/harbor-ha.yaml`, `hack/helm-postrender.py` | Harbor in HA: Secrets, pinned Helm chart, `preStop` post-renderer (`make harbor-ha`) |
-| `hack/install.sh` | `infra-lb`, then `harbor-ha` (`make install`) |
+| `hack/install.sh` | `make infra-lb`, then `harbor-ha` (`make install`) |
 | `hack/deploy-app.sh` | Build/push the demo image, trust Harbor's CA on the node, deploy the app (`make deploy-app`) |
 | `hack/tests/` | Failure-test scripts and analyzers: `h41-push-pull.sh`, `h42-kill-during-push.sh`, `h43-rolling-update.sh`, `h44-node-loss.sh`, `h45-app-rollout.sh`, `h46-proxy-cache.sh`, `h47-role-failure.sh`, `h62-sync-mode.sh` (+ `h4x_analyze.py`) |
 | `ansible/` | `verify.yml` + roles `verify_*` (V1..V12), `group_vars/all.yml` (numbers, addresses), `files/s3-access.sh`; run with `make verify` |
@@ -28,13 +28,13 @@ Where to start: `backlog.md` (Russian: this fork's own plan P0–P6 and decision
 
 ## Defaults
 
-- Cluster `harbor` → context `kind-harbor`; LB IP `172.20.0.100` → `core.harbor.domain`; MetalLB pool `172.20.0.100–110`; the demo app service gets `172.20.0.101`. The subnet must match the Docker `kind` network (`docker network inspect kind`, here `172.20.0.0/16`).
+- Cluster `harbor` → context `kind-harbor`; LB IP `172.20.0.100` (Keepalived VIP) → `core.harbor.domain`; the demo app is a NodePort (`<control-plane IP>:30500`). The subnet must match the Docker `kind` network (`docker network inspect kind`, here `172.20.0.0/16`).
 - Harbor admin `admin` / `Harbor12345` (lab default); generated passwords live only in Secrets (`harbor-deps`: `pg-credentials`, `redis-credentials`, `s3-credentials`; `default`: `harbor-ha-*`).
 - Demo project / image `core.harbor.domain/python/hello:1.0`, pull secret `harbor`, port 5000; `GET /` → `Hello, Kube! (from <pod>)`, `GET /healthz` → `ok`. The demo app runs on the control-plane node.
 
 ## Typical flow
 
-1. `make cluster` → `make infra-lb` → `make ha-deps` → `make add-host` → `make harbor-ha`.
+1. `make cluster` → `make ha-deps` → `make infra-lb` → `make add-host` → `make harbor-ha`.
 2. Once, by the user (interactive `sudo`): host Docker must trust `core.harbor.domain` (`insecure-registries`); `make deploy-app` checks and prints the exact command if missing.
 3. `make deploy-app`, then `make verify` (or the runbook checks by hand) and the failure tests in `hack/tests/`.
 4. Cleanup: `make cluster-delete`.

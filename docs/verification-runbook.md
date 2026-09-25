@@ -1,5 +1,8 @@
 # Ранбук: проверка стенда
 
+> **P2 (2026-09-25):** Infra LB теперь Keepalived + HAProxy (`hack/ha/infra-lb.yaml`), MetalLB и ingress-nginx удалены, demo-приложение — NodePort `<IP control-plane>:30500`. Разделы ниже про MetalLB, ingress-nginx, `172.20.0.101` и анонс адреса устарели — переписываются в P6.
+
+
 Как проверить, что лабораторный стенд Harbor active-active собран правильно и здоров. Это те же проверки, которые выполнялись при аудите перед Phase 3 (2026-09-24); их можно запускать самому в любой момент: после `make cluster infra-lb ha-deps`, после правок манифестов, перед началом новой фазы.
 
 Ранбук проверяет **состояние и распределение** (веха 1). Отказоустойчивость (падение primary PostgreSQL, master Redis, HAProxy, ноды) сюда не входит: это Phase 4 / веха 2 в `backlog.md`.
@@ -308,7 +311,7 @@ kubectl -n harbor-deps exec garage-0 -- /garage bucket info registry-blobs 2>/de
 ```bash
 OV='{"spec":{"nodeSelector":{"harbor-ha/role":"app"},"tolerations":[{"key":"harbor-ha/role","operator":"Equal","value":"app","effect":"NoSchedule"}]}}'
 g(){ kubectl -n harbor-deps get secret "$1" -o jsonpath="{.data.$2}" | base64 -d; }
-PGI=postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+PGI=postgres:15.19-alpine3.24@sha256:f7d23353e1b15400d22ebe31189f4d314b87a4c129cc400c8c2d8d4ca127bf81
 VKI=valkey/valkey:9.0.6-alpine3.24@sha256:187679e3bd4036959631e3f03983ab2ba503ab21e6fd0454d508e909db2ee989
 
 # V9.1 PostgreSQL через Harbor LB + V9.2 Consul
