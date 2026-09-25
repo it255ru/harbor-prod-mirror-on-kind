@@ -68,6 +68,6 @@ kubectl apply -f "${APP_DIR}/deployment.yml"
 kubectl rollout restart deployment/hello-deployment >/dev/null
 kubectl wait --for=condition=ready pod -l app=hello --timeout=90s
 
-SVC_IP="$(kubectl get svc hello-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+NODE_IP="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${NODE}" 2>/dev/null || true)"
 echo
-echo "==> Demo app ready: http://${SVC_IP:-<pending>}:5000  (GET /healthz for the probe endpoint)"
+echo "==> Demo app ready: http://${NODE_IP:-<control-plane IP>}:30500  (NodePort of hello-service; GET /healthz for the probe endpoint)"

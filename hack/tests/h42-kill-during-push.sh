@@ -12,7 +12,7 @@
 #     to be caught, and always removes the throttle on exit;
 #   * finds the pod that is actually receiving the upload by the growth of its eth0 rx counter and
 #     deletes it with --force --grace-period=0 (a crash, not a graceful stop);
-#   * waits for `docker push` to finish, prints the client retries and the ingress status codes;
+#   * waits for `docker push` to finish, prints the client retries and the status codes of the Harbor nginx proxy;
 #   * cleans up by DIGEST (never by tag: a shared tag would delete other tags of the same artifact,
 #     e.g. python/hello:1.0).
 #
@@ -82,8 +82,8 @@ wait $PUSHPID
 echo "== push finished at $(date -u +%T.%N | cut -c1-12)   load after: $(cut -d' ' -f1-3 /proc/loadavg)"
 grep -E "Retrying|retry|error|denied|unauthorized|digest:|exit=" push.log | sed 's/[0-9]* seconds\?/N s/' | sort | uniq -c | head -12
 
-echo "== ingress status codes for /v2/ since T0 (both controllers)"
-for c in $(kubectl get pods -l app.kubernetes.io/name=ingress-nginx -o name); do kubectl logs "$c" --since-time="$T0"; done \
+echo "== nginx (Harbor proxy) status codes for /v2/ since T0 (both replicas)"
+for c in $(kubectl get pods -l app=harbor,component=nginx -o name); do kubectl logs "$c" --since-time="$T0"; done \
   | grep -E '"(PUT|PATCH|POST|GET|HEAD) /v2/' | awk '{for(i=1;i<=NF;i++) if ($i ~ /^"(PUT|PATCH|POST|GET|HEAD)$/) {m=substr($i,2); print m, $(i+3)}}' \
   | sort | uniq -c | sort -k2,2 -k3,3n
 

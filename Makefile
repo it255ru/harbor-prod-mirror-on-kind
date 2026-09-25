@@ -59,22 +59,30 @@ $(KIND): $(LOCALBIN)
 
 ##@ Harbor
 
+KEEPALIVED_IMAGE ?= harbor-ha/keepalived:2.3.4-alpine3.24
+
+.PHONY: keepalived-image
+keepalived-image: kind ## Build the Keepalived image and load it into the lb nodes.
+	docker build -t $(KEEPALIVED_IMAGE) hack/ha/keepalived
+	$(KIND) load docker-image $(KEEPALIVED_IMAGE) --name $(CLUSTER) --nodes $$(kubectl get nodes -l harbor-ha/role=lb -o name | sed 's|node/||' | paste -sd,)
+
 .PHONY: infra-lb
-infra-lb: ## Install the Infra LB only (MetalLB + ingress-nginx on the lb nodes).
-	@./hack/install-infra.sh
+infra-lb: keepalived-image ## Install the Infra LB (Keepalived VIP + HAProxy on the lb nodes; the Harbor backends appear with `make harbor-ha`).
+	@kubectl apply -f hack/ha/00-namespace.yaml -f hack/ha/infra-lb.yaml
+	@kubectl -n harbor-deps rollout status daemonset/infra-lb --timeout=180s
 
 .PHONY: harbor-ha
-harbor-ha: ## Install Harbor in HA mode (needs `make infra-lb ha-deps`). DRY_RUN=1 renders against the cluster only.
+harbor-ha: ## Install Harbor in HA mode (needs `make ha-deps`; reachable through `make infra-lb`). DRY_RUN=1 renders against the cluster only.
 	@DRY_RUN=$(DRY_RUN) ./hack/install-harbor-ha.sh
 
 .PHONY: install
-install: ## Install Harbor.
+install: ## Install Harbor (infra-lb + harbor-ha).
 	@./hack/install.sh
 
 ##@ HA dependencies
 
 .PHONY: ha-deps
-ha-deps: consul postgres redis harbor-lb s3 ## Install all HA dependencies in order (after `make cluster infra-lb`).
+ha-deps: consul postgres redis harbor-lb s3 ## Install all HA dependencies in order (after `make cluster`).
 
 .PHONY: consul
 consul: ## Install Consul x3 (DCS for Patroni) on the consul nodes.
@@ -130,7 +138,7 @@ deploy-app: ## Build, push, and deploy the demo app (run after `install`).
 .PHONY: images-save images-load images-check images-status
 images-save: ## Save the pinned third-party images and charts into the local cache (IMAGE_CACHE, default ~/.cache/harbor-ha).
 	@./hack/image-cache.sh save
-images-load: ## Load the cached images into the nodes (run after `make cluster`, before `make infra-lb`).
+images-load: ## Load the cached images into the nodes (run after `make cluster`, before `make ha-deps`).
 	@CLUSTER=$(CLUSTER) KIND=$(KIND) ./hack/image-cache.sh load
 images-check: ## Check online that every pinned image and chart is still pullable (before deleting a working stand).
 	@./hack/image-cache.sh check

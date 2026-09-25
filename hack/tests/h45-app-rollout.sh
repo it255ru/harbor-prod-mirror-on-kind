@@ -5,7 +5,7 @@
 # usage: hack/tests/h45-app-rollout.sh
 # env:   DEGRADE=1  force-delete one registry pod and one core pod right before the rollout, so the
 #                   kubelet pulls while Harbor is running on a single replica of each (default 0)
-#        LB_IP (default 172.20.0.101, hello-service), HARBOR_HOST, HARBOR_AUTH, WORKDIR
+#        APP_URL (default http://<control-plane IP>:30500, hello-service NodePort), HARBOR_HOST, HARBOR_AUTH, WORKDIR
 #
 # What it does
 #   1. counts which pods answer before the rollout;
@@ -18,12 +18,12 @@
 #      the other tags of the same artifact).
 set -uo pipefail
 HOST=${HARBOR_HOST:-core.harbor.domain}; AUTH=${HARBOR_AUTH:-admin:Harbor12345}
-LB_IP=${LB_IP:-172.20.0.101}; DEGRADE=${DEGRADE:-0}
+APP_URL=${APP_URL:-http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${CLUSTER:-harbor}-control-plane):30500}; DEGRADE=${DEGRADE:-0}
 W="${WORKDIR:-$(mktemp -d)}"; mkdir -p "$W"; cd "$W"
 TAG=h45-$(date +%s); IMG=$HOST/python/hello:$TAG; BASE=$HOST/python/hello:1.0
 now_ms() { date +%s%3N; }
 dist() {  # n -> which pods answer
-  for _ in $(seq 1 "$1"); do curl -s -m 3 "http://$LB_IP:5000/" | sed 's/.*(from \(.*\))/\1/'; echo; done | grep -v '^$' | sort | uniq -c | awk '{print "   "$1"x "$2}'
+  for _ in $(seq 1 "$1"); do curl -s -m 3 "$APP_URL/" | sed 's/.*(from \(.*\))/\1/'; echo; done | grep -v '^$' | sort | uniq -c | awk '{print "   "$1"x "$2}'
 }
 DIGEST=""
 cleanup() {
@@ -57,7 +57,7 @@ fi
 
 : > probe.log; : > events.log; STOP=$W/stop; rm -f "$STOP"
 ( while [ ! -e "$STOP" ]; do
-    r=$(curl -s -m 3 -w " %{http_code}" "http://$LB_IP:5000/" 2>/dev/null); rc=$?
+    r=$(curl -s -m 3 -w " %{http_code}" "$APP_URL/" 2>/dev/null); rc=$?
     echo "$(now_ms) rc=$rc ${r:-none}" >> probe.log; sleep 0.1
   done ) &
 sleep 5

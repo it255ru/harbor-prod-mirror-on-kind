@@ -151,7 +151,7 @@ if docker network inspect kind >/dev/null 2>&1; then
     if echo "$KIND_NET" | grep -q "$LB_PREFIX"; then
       ok "LB_IP ${LB_IP} looks aligned with kind subnet prefix ${LB_PREFIX}"
     else
-      warn "LB_IP ${LB_IP} may NOT match kind network — update LB_IP + MetalLB + nginx together"
+      warn "LB_IP ${LB_IP} may NOT match kind network — update LB_IP in the Makefile and virtual_ipaddress in hack/ha/infra-lb.yaml together"
       NOTES+=("Revisit LB_IP vs kind subnet before/after make cluster")
     fi
   fi

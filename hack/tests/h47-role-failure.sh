@@ -6,8 +6,8 @@
 #        HARBOR_HOST, HARBOR_AUTH
 #
 # Victim node:
-#   lb     the lb node that currently ANNOUNCES the Infra LB address (ARP owner of 172.20.0.100): it carries
-#          one ingress-nginx, one HAProxy and the active MetalLB speaker
+#   lb     the lb node that currently ANNOUNCES the Infra LB address (holder of the Keepalived VIP 172.20.0.100): it carries
+#          one infra-lb pod (Keepalived MASTER + HAProxy) and one harbor-lb HAProxy
 #   pg     the node of the current Patroni leader        (Patroni must promote the replica through Consul)
 #   redis  the node of the current Valkey master         (Sentinel must promote a replica)
 #   consul the node of the current Consul raft leader    (a new leader must be elected, Patroni must not fail over)
@@ -43,11 +43,9 @@ pg_leader_from() { kubectl -n $NS exec "$1" -- curl -s -m 3 http://consul.$NS:85
 redis_master()  { for i in 0 1 2; do [ "$(kubectl -n $NS exec redis-$i -c valkey -- valkey-cli role 2>/dev/null | head -1)" = master ] && { echo redis-$i; return; }; done; }
 consul_leader() { for i in 0 1 2; do l=$(kubectl -n $NS exec consul-$i -- consul operator raft list-peers 2>/dev/null | awk '$4=="leader"{print $1}'); [ -n "$l" ] && { echo "$l"; return; }; done; }
 node_of()       { kubectl -n $NS get pod "$1" -o jsonpath='{.spec.nodeName}' 2>/dev/null; }
-lb_announcer() {
-  curl -s -o /dev/null -m 3 http://172.20.0.100/
-  mac=$(ip neigh show 172.20.0.100 | awk '{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}' | head -1)
+lb_announcer() {  # the lb node whose eth0 carries the Keepalived VIP
   for n in $(kubectl get nodes -l harbor-ha/role=lb -o name | sed 's|node/||'); do
-    [ "$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.MacAddress}}{{end}}' "$n")" = "$mac" ] && { echo "$n"; return; }
+    docker exec "$n" ip -4 addr show eth0 2>/dev/null | grep -q " 172.20.0.100/" && { echo "$n"; return; }
   done
 }
 node_ready() { [ "$(kubectl get node "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = "True" ]; }
@@ -76,7 +74,7 @@ failover_done() {
 }
 healthy() {  # the role is fully back
   case "$ROLE" in
-    lb)     [ "$(kubectl get deploy ingress-nginx-controller --no-headers | awk '{print $2}')" = "2/2" ] && [ "$(kubectl -n $NS get deploy harbor-lb --no-headers | awk '{print $2}')" = "2/2" ] ;;
+    lb)     [ "$(kubectl -n $NS get ds infra-lb --no-headers | awk '{print $4}')" = "2" ] && [ "$(kubectl -n $NS get deploy harbor-lb --no-headers | awk '{print $2}')" = "2/2" ] ;;
     pg)     kubectl -n $NS exec "$SURV_PG" -- patronictl -c /etc/patroni/patroni.yml list -f json 2>/dev/null | python3 -c "import sys,json; m=json.load(sys.stdin); sys.exit(0 if len(m)==2 and sorted(x['Role'] for x in m)==['Leader','Replica'] and all(x['State'] in ('running','streaming') for x in m) else 1)" ;;
     redis)  [ "$(for i in 0 1 2; do kubectl -n $NS exec redis-$i -c valkey -- valkey-cli role 2>/dev/null | head -1; done | sort | paste -sd' ')" = "master slave slave" ] && kubectl -n $NS exec "$SURV_REDIS" -c sentinel -- valkey-cli -p 26379 sentinel ckquorum mymaster 2>/dev/null | grep -q "^OK 3" ;;
     consul) [ "$(kubectl -n $NS exec "$SURV_CONSUL" -- consul operator raft list-peers 2>/dev/null | awk 'NR>1' | wc -l)" = 3 ] ;;

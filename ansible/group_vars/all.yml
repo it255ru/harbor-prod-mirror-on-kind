@@ -1,12 +1,12 @@
 # Source of truth for the numbers below: hack/config/kind-cluster.yaml, Makefile (LB_IP), docs/stand-topology.md.
 kube_context: kind-harbor
 deps_ns: harbor-deps            # hack/ha/00-namespace.yaml
-app_ns: default                 # namespace of Harbor, ingress-nginx and the demo app
+app_ns: default                 # namespace of Harbor and the demo app
 
-lb_ip: 172.20.0.100             # Infra LB (Makefile LB_IP)
-demo_ip: 172.20.0.101           # LoadBalancer of the demo app
+lb_ip: 172.20.0.100             # Infra LB: Keepalived VIP (Makefile LB_IP, hack/ha/infra-lb.yaml)
+demo_nodeport: 30500            # NodePort of the demo app (hello-service), on the control-plane node
+demo_node: harbor-control-plane
 kind_subnet: 172.20.0.0/16      # docker network "kind"
-lb_pool: 172.20.0.100-172.20.0.110
 
 harbor_host: core.harbor.domain
 harbor_admin_user: admin

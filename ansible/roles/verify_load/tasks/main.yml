@@ -1,29 +1,39 @@
 # V12: requests through the Infra LB are served by both replicas. Harbor apps have no access log, so count in the
 # ingress-nginx log: the line has the backend service in brackets and the address of the receiving pod after it.
+# V12: requests through the Infra LB are served by both replicas. Harbor apps have no access log and the Harbor nginx proxies
+# to the Services core/portal (its upstream is a ClusterIP), so the split is counted where it is visible per pod:
+# in the access log of each nginx pod (HAProxy -> nginx) and in the log of each registry pod (core -> registry, kube-proxy).
+# Requests run 10 at a time: core keeps one persistent connection per registry pod and sequential requests all reuse it
+# (found in P5: 100 sequential /v2/ requests went to one registry pod, 100 parallel ones split 47/59).
+# The core/portal split behind the Service is not observable this way (it was with ingress-nginx, which addressed pods).
 - name: V12 | start time
   ansible.builtin.command: date -u +%Y-%m-%dT%H:%M:%SZ
   register: v12_t0
   changed_when: false
 
-- name: "V12 | requests through the Infra LB (core - API, portal - UI)"
+- name: "V12 | requests through the Infra LB (core - API, portal - UI, /v2/ with credentials - core -> registry)"
   ansible.builtin.command: >-
-    sh -c 'for i in $(seq {{ verify_load_requests }}); do curl -sk -o /dev/null https://{{ harbor_host }}{{ item }}; done'
-  loop: ["/api/v2.0/systeminfo", "/"]
+    sh -c 'seq {{ verify_load_requests }} | xargs -P10 -I{}  curl -sk -o /dev/null -u {{ harbor_admin_user }}:{{ harbor_admin_password }} https://{{ harbor_host }}{{ item }}'
+  loop: ["/api/v2.0/systeminfo", "/", "/v2/"]
   changed_when: false
   failed_when: false
+  no_log: true
 
-- name: V12 | ingress-nginx logs and pod addresses
+- name: V12 | request counts per nginx pod
   ansible.builtin.shell: >-
-    for p in $(kubectl --context {{ kube_context }} -n {{ app_ns }} get pods -l app.kubernetes.io/name=ingress-nginx -o name); do
-    kubectl --context {{ kube_context }} -n {{ app_ns }} logs $p --since-time={{ v12_t0.stdout }}; done
-  register: v12_log
+    for p in $(kubectl --context {{ kube_context }} -n {{ app_ns }} get pods -l app=harbor,component=nginx -o name); do
+    echo "$p $(kubectl --context {{ kube_context }} -n {{ app_ns }} logs $p --since-time={{ v12_t0.stdout }} | grep -c HTTP/1)"; done
+  register: v12_nginx
   changed_when: false
   failed_when: false
 
-- name: V12 | pods of core and portal
-  kubernetes.core.k8s_info: {kind: Pod, namespace: "{{ app_ns }}", label_selectors: ["app=harbor,component={{ item }}"]}
-  loop: [core, portal]
-  register: v12_pods
+- name: V12 | request counts per registry pod
+  ansible.builtin.shell: >-
+    for p in $(kubectl --context {{ kube_context }} -n {{ app_ns }} get pods -l app=harbor,component=registry -o name); do
+    echo "$p $(kubectl --context {{ kube_context }} -n {{ app_ns }} logs $p -c registry --since-time={{ v12_t0.stdout }} | grep -cE '(GET|HEAD) /v2/')"; done
+  register: v12_reg
+  changed_when: false
+  failed_when: false
 
 - name: V12 | PostgreSQL connections of the harbor user on the leader
   kubernetes.core.k8s_exec:
@@ -48,24 +58,17 @@
 
 - name: V12 | record
   vars:
-    hits: "{{ v12_log.stdout | default('') | regex_findall('\\[default-harbor-(core|portal)-80\\] \\[\\] ([0-9.]+):') }}"
-    ip_of: >-
-      {%- set m = {} -%}
-      {%- for r in v12_pods.results -%}{%- for p in r.resources -%}{%- set _ = m.update({p.status.podIP: p.metadata.name}) -%}{%- endfor -%}{%- endfor -%}
-      {{ m }}
-    per: >-
-      {%- set out = {'core': {}, 'portal': {}} -%}
-      {%- for c, ip in hits -%}{%- set _ = out[c].update({ip_of.get(ip, ip): out[c].get(ip_of.get(ip, ip), 0) + 1}) -%}{%- endfor -%}
-      {{ out }}
+    nginx_hits: "{{ v12_nginx.stdout_lines | default([]) | map('split', ' ') | map('last') | map('int') | list }}"
+    reg_hits: "{{ v12_reg.stdout_lines | default([]) | map('split', ' ') | map('last') | map('int') | list }}"
     pg: "{{ v12_pg.stdout | default('0|0') | trim | split('|') }}"
     min_share: "{{ (verify_load_requests | int * 0.1) | int }}"
   ansible.builtin.set_fact:
     verify_results: >-
       {{ verify_results + [
-        {'id': 'V12.1', 't': 'core: requests through the LB split between both replicas',
-         's': 'PASS' if (per.core | length == 2 and per.core.values() | min >= min_share | int) else 'FAIL', 'd': per.core.values() | list | join(' / ') ~ ' requests'},
-        {'id': 'V12.2', 't': 'portal: requests through the LB split between both replicas',
-         's': 'PASS' if (per.portal | length == 2 and per.portal.values() | min >= min_share | int) else 'FAIL', 'd': per.portal.values() | list | join(' / ') ~ ' requests'},
+        {'id': 'V12.1', 't': 'Harbor nginx: requests through the LB split between both replicas (HAProxy balancing)',
+         's': 'PASS' if (nginx_hits | length == 2 and nginx_hits | min >= min_share | int) else 'FAIL', 'd': nginx_hits | join(' / ') ~ ' requests'},
+        {'id': 'V12.2', 't': 'registry: /v2/ requests through the LB split between both replicas (core -> Service)',
+         's': 'PASS' if (reg_hits | length == 2 and reg_hits | min >= min_share | int) else 'FAIL', 'd': reg_hits | join(' / ') ~ ' requests'},
         {'id': 'V12.3', 't': 'PostgreSQL: harbor connections on the leader come from both HAProxy pods',
          's': 'PASS' if (pg[0] | int > 0 and pg[1] | default('0') | int == 2) else ('WARN' if pg[0] | int > 0 else 'FAIL'),
          'd': '%s connections from %s addresses' | format(pg[0], pg[1] | default('?'))}

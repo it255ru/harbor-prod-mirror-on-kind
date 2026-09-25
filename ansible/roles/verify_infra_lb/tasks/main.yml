@@ -1,14 +1,18 @@
-# V3: Infra LB = ingress-nginx x2 + MetalLB.
-- name: V3 | gather
-  kubernetes.core.k8s_info: {kind: Pod, namespace: "{{ app_ns }}"}
+# V3: Infra LB = Keepalived (VIP) + HAProxy (TCP passthrough to the Harbor nginx pods), DaemonSet infra-lb on the lb nodes.
+- name: V3 | infra-lb pods
+  kubernetes.core.k8s_info: {kind: Pod, namespace: "{{ deps_ns }}", label_selectors: ["app=infra-lb"]}
   register: v3_pods
-- name: V3 | ingress service
-  kubernetes.core.k8s_info: {kind: Service, namespace: "{{ app_ns }}", name: ingress-nginx-controller}
-  register: v3_svc
-- name: V3 | MetalLB pool and advertisement
-  kubernetes.core.k8s_info: {api_version: metallb.io/v1beta1, kind: "{{ item }}"}
-  loop: [IPAddressPool, L2Advertisement]
-  register: v3_metallb
+- name: V3 | which lb node holds the VIP
+  ansible.builtin.command: docker exec {{ item }} ip -4 addr show eth0
+  loop: "{{ role_of | dict2items | selectattr('value', 'eq', 'lb') | map(attribute='key') | list }}"
+  register: v3_vip
+  changed_when: false
+  failed_when: false
+- name: V3 | HAProxy backends of the Infra LB (stats on the node loopback)
+  ansible.builtin.command: docker exec {{ item }} curl -s 'http://127.0.0.1:8405/stats;csv'
+  loop: "{{ role_of | dict2items | selectattr('value', 'eq', 'lb') | map(attribute='key') | list }}"
+  register: v3_stats
+  changed_when: false
   failed_when: false
 - name: V3 | docker network
   ansible.builtin.command: docker network inspect -f '{% raw %}{{range .IPAM.Config}}{{.Subnet}} {{end}}{% endraw %}' kind
@@ -19,45 +23,41 @@
   ansible.builtin.uri:
     url: "{{ item }}://{{ lb_ip }}/"
     validate_certs: false
+    follow_redirects: none
     timeout: 5
-    status_code: [-1, 200, 404, 502, 503]
+    status_code: [-1, 200, 301, 302, 308, 502, 503]
   loop: [http, https]
   register: v3_http
   failed_when: false
 
 - name: V3 | record
   vars:
-    ingress: >-
-      {{ v3_pods.resources | selectattr('metadata.name', 'match', '^ingress-nginx-controller') |
-         selectattr('status.phase', 'eq', 'Running') | rejectattr('metadata.deletionTimestamp', 'defined') | list }}
-    ingress_nodes: "{{ ingress | map(attribute='spec.nodeName') | list }}"
-    ingress_roles: "{{ ingress_nodes | map('extract', role_of) | list }}"
-    lb_addr: "{{ (v3_svc.resources | first | default({})).status.loadBalancer.ingress | default([{}]) | first | default({}) }}"
-    names: "{{ v3_pods.resources | map(attribute='metadata.name') | list }}"
-    count: "{{ ['metallb-controller', 'metallb-speaker', 'metallb-frr-k8s-[a-z0-9]{5}$', 'metallb-frr-k8s-statuscleaner'] }}"
-    pool: "{{ v3_metallb.results[0].resources | default([]) | map(attribute='spec.addresses') | flatten }}"
-    l2: "{{ v3_metallb.results[1].resources | default([]) | length }}"
-    metallb_running: >-
-      {{ v3_pods.resources | selectattr('metadata.name', 'match', '^metallb') |
-         rejectattr('status.phase', 'eq', 'Running') | list | length == 0 }}
-    n_speaker: "{{ names | select('match', '^metallb-speaker') | list | length }}"
-    n_frr: "{{ names | select('match', '^metallb-frr-k8s-[a-z0-9]{5}$') | list | length }}"
+    lbpods: >-
+      {{ v3_pods.resources | selectattr('status.phase', 'eq', 'Running') | rejectattr('metadata.deletionTimestamp', 'defined') | list }}
+    lbpod_nodes: "{{ lbpods | map(attribute='spec.nodeName') | list }}"
+    lbpod_ready: >-
+      {{ lbpods | selectattr('status.containerStatuses', 'defined') |
+         map(attribute='status.containerStatuses') | map('selectattr', 'ready') | map('list') | map('length') | select('eq', 2) | list | length }}
+    holders: "{{ v3_vip.results | selectattr('stdout', 'search', ' ' ~ lb_ip ~ '/') | map(attribute='item') | list }}"
+    up: >-
+      {%- set out = [] -%}
+      {%- for r in v3_stats.results -%}
+      {%- set n = r.stdout | default('') | regex_findall('(?m)^harbor_https,nginx[0-9]+,[^\n]*$') | select('search', ',UP,') | list | length -%}
+      {%- set _ = out.append(r.item ~ '=' ~ n) -%}
+      {%- endfor -%}
+      {{ out }}
     codes: "{{ v3_http.results | map(attribute='status') | list }}"
   ansible.builtin.set_fact:
     verify_results: >-
       {{ verify_results + [
-        {'id': 'V3.1', 't': 'two ingress-nginx pods on different lb nodes',
-         's': 'PASS' if (ingress | length == 2 and ingress_nodes | unique | length == 2 and ingress_roles | unique == ['lb']) else 'FAIL',
-         'd': ingress_nodes | join(', ')},
-        {'id': 'V3.2', 't': 'LB address ' ~ lb_ip ~ ' and kind subnet ' ~ kind_subnet,
-         's': 'PASS' if (lb_addr.ip | default('') == lb_ip and kind_subnet in v3_net.stdout | default('')) else 'FAIL',
-         'd': 'service ' ~ lb_addr.ip | default('none') ~ ', network ' ~ (v3_net.stdout | default('?') | trim)},
-        {'id': 'V3.3', 't': 'LB answers from the host (404 = default backend)',
-         's': 'PASS' if codes == [404, 404] else 'FAIL', 'd': 'http/https ' ~ codes | join('/')},
-        {'id': 'V3.4', 't': 'MetalLB: controller, 2 speaker, 2 frr-k8s, statuscleaner, pool, L2 advertisement',
-         's': 'PASS' if (metallb_running | bool and n_speaker | int == 2 and n_frr | int == 2 and
-                         names | select('match', '^metallb-controller') | list | length == 1 and
-                         names | select('match', '^metallb-frr-k8s-statuscleaner') | list | length == 1 and
-                         lb_pool in pool and l2 | int >= 1) else 'FAIL',
-         'd': 'speaker %s, frr %s, pool %s, l2adv %s' | format(n_speaker, n_frr, pool | join(','), l2)}
+        {'id': 'V3.1', 't': 'two infra-lb pods (haproxy + keepalived, both containers ready) on different lb nodes',
+         's': 'PASS' if (lbpods | length == 2 and lbpod_nodes | unique | length == 2 and (lbpod_nodes | map('extract', role_of) | unique | list) == ['lb'] and lbpod_ready | int == 2) else 'FAIL',
+         'd': lbpod_nodes | join(', ')},
+        {'id': 'V3.2', 't': 'VIP ' ~ lb_ip ~ ' on exactly one lb node; kind subnet ' ~ kind_subnet,
+         's': 'PASS' if (holders | length == 1 and kind_subnet in v3_net.stdout | default('')) else 'FAIL',
+         'd': 'holder ' ~ (holders | join(',') or 'none') ~ ', network ' ~ (v3_net.stdout | default('?') | trim)},
+        {'id': 'V3.3', 't': 'LB answers from the host (Harbor UI 200 over https, http redirects)',
+         's': 'PASS' if (codes[1] | default(0) == 200 and codes[0] | default(0) in [301, 302, 308]) else 'FAIL', 'd': 'http/https ' ~ codes | join('/')},
+        {'id': 'V3.4', 't': 'both HAProxy see both Harbor nginx pods UP (backend harbor_https)',
+         's': 'PASS' if (up | length == 2 and up | select('search', '=2$') | list | length == 2) else 'FAIL', 'd': up | join(', ')}
       ] }}

@@ -10,7 +10,8 @@ spec:
   - protocol: "TCP"
     port: 5000
     targetPort: 5000
-  type: LoadBalancer
+    nodePort: 30500   # no MetalLB (D11): reachable at <control-plane node IP>:30500, the demo app runs there
+  type: NodePort
 
 ---
 apiVersion: apps/v1

@@ -13,7 +13,7 @@ image:
 imagePullSecrets: 
   - name: harbor
 service:
-  type: LoadBalancer
+  type: NodePort
   port: 5000
 
 # Workers are tainted by role (HA stand); run on the control-plane node, which trusts Harbor's CA.

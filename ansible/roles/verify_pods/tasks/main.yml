@@ -24,7 +24,6 @@
       {%- set sel = p.spec.get('nodeSelector') or {} -%}
       {%- set have = role_of.get(p.spec.nodeName, '?') -%}
       {%- set want = sel.get('harbor-ha/role') -%}
-      {%- if want is none and p.metadata.name is match('^(ingress-nginx|metallb)') -%}{%- set want = 'lb' -%}{%- endif -%}
       {%- if want is none and 'node-role.kubernetes.io/control-plane' in sel -%}{%- set want = 'none' -%}{%- endif -%}
       {%- if want is none -%}{%- set _ = out.append('NO-SELECTOR ' ~ p.metadata.name) -%}
       {%- elif want != have -%}{%- set _ = out.append('MISPLACED ' ~ p.metadata.name ~ ' want ' ~ want ~ ' on ' ~ have) -%}

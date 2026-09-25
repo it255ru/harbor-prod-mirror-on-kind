@@ -1,0 +1,174 @@
+# Infra LB (backlog P2, D11): Keepalived + HAProxy on the two `lb` nodes; replaces MetalLB + ingress-nginx.
+# One DaemonSet, hostNetwork, two containers per node:
+#   keepalived  VRRP, holds the floating address 172.20.0.100 on eth0 (both nodes BACKUP + nopreempt: the address does not
+#               move back when the failed node returns); gives it up when the local HAProxy health check fails
+#   haproxy     TCP passthrough of :443 and :80 to the Harbor nginx pods (TLS is terminated by Harbor's nginx with the
+#               certificate from Secret harbor-ha-ingress-tls, so `getcert` and the node trust are unchanged)
+# Separate from the Harbor LB (harbor-lb: PostgreSQL/Redis), so an Infra LB failure does not touch the databases.
+# Address, image tags and digests: backlog.md "Закреплённые версии". The keepalived image is built by `make keepalived-image`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infra-lb-config
+  namespace: harbor-deps
+data:
+  haproxy.cfg: |
+    global
+      log stdout format raw local0
+      maxconn 4096
+
+    defaults
+      mode tcp
+      log global
+      timeout connect 5s
+      timeout client 30m
+      timeout server 30m
+      timeout check 3s
+      retries 2
+      option redispatch
+
+    resolvers k8s
+      parse-resolv-conf
+      resolve_retries 3
+      timeout resolve 1s
+      timeout retry 1s
+      hold valid 5s
+
+    # local health endpoint for the Keepalived check script and for probes; hostNetwork, so it is bound to loopback only
+    frontend health
+      mode http
+      bind 127.0.0.1:8405
+      monitor-uri /healthz
+      stats enable
+      stats uri /stats
+      stats refresh 5s
+
+    frontend https
+      bind :443
+      default_backend harbor_https
+
+    frontend http
+      bind :80
+      default_backend harbor_http
+
+    # Backends: one server per Harbor nginx pod (headless Service harbor-nginx-headless, see below).
+    # The check is a TCP connect + TLS handshake, NOT an HTTP request through nginx: /api/v2.0/ping goes nginx -> core (Service),
+    # and while Kubernetes still lists a dead core pod (until its node is NotReady, ~50 s) the ping hangs on a healthy nginx too,
+    # which switched off BOTH nginx and made a lost app node a full outage (found in P5, h44).
+    backend harbor_https
+      default-server check check-ssl verify none inter 3s fall 3 rise 2 on-marked-down shutdown-sessions resolvers k8s init-addr none resolve-prefer ipv4
+      server-template nginx 4 harbor-nginx-headless.default.svc.cluster.local:8443
+
+    backend harbor_http
+      default-server check inter 3s fall 3 rise 2 on-marked-down shutdown-sessions resolvers k8s init-addr none resolve-prefer ipv4
+      server-template nginx 4 harbor-nginx-headless.default.svc.cluster.local:8080
+  keepalived.conf: |
+    global_defs {
+      router_id infra_lb
+    }
+    vrrp_script chk_haproxy {
+      script "/etc/keepalived/check-haproxy.sh"
+      interval 2
+      timeout 2
+      fall 2
+      rise 2
+    }
+    vrrp_instance INFRA_LB {
+      state BACKUP
+      nopreempt
+      interface eth0
+      virtual_router_id 51
+      priority 100
+      advert_int 1
+      virtual_ipaddress {
+        172.20.0.100/16 dev eth0
+      }
+      track_script {
+        chk_haproxy
+      }
+    }
+  check-haproxy.sh: |
+    #!/bin/sh
+    exec wget -q -T 2 -O /dev/null http://127.0.0.1:8405/healthz
+---
+# Harbor nginx pods as individual HAProxy backends (the chart's Service `harbor` is a ClusterIP, not a per-pod list)
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-nginx-headless
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    app: harbor
+    component: nginx
+  ports:
+    - {name: https, port: 8443}
+    - {name: http, port: 8080}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: infra-lb
+  namespace: harbor-deps
+spec:
+  selector:
+    matchLabels:
+      app: infra-lb
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: infra-lb
+      annotations:
+        # roll pods when the config changes
+        config-version: "5"
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        harbor-ha/role: lb
+      tolerations:
+        - {key: harbor-ha/role, operator: Equal, value: lb, effect: NoSchedule}
+      containers:
+        - name: haproxy
+          image: haproxy:3.4.4-alpine3.24@sha256:52c5921e1619f39cbd5b25e1b4b5847667917f39745056cf004d9c263fbf11b9
+          args: [-f, /usr/local/etc/haproxy/haproxy.cfg]
+          securityContext:
+            runAsUser: 0            # binds :80 and :443 on the node
+          readinessProbe:
+            httpGet: {host: 127.0.0.1, path: /healthz, port: 8405}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {host: 127.0.0.1, path: /healthz, port: 8405}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+          volumeMounts:
+            - {name: config, mountPath: /usr/local/etc/haproxy/haproxy.cfg, subPath: haproxy.cfg, readOnly: true}
+        - name: keepalived
+          image: harbor-ha/keepalived:2.3.4-alpine3.24
+          imagePullPolicy: Never      # built locally and loaded into the lb nodes (make keepalived-image)
+          args: [--dont-fork, --log-console, --log-detail, --use-file=/etc/keepalived/keepalived.conf]
+          securityContext:
+            capabilities:
+              add: [NET_ADMIN, NET_BROADCAST, NET_RAW]
+          resources:
+            requests: {cpu: 20m, memory: 16Mi}
+          volumeMounts:
+            - {name: keepalived, mountPath: /etc/keepalived, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: infra-lb-config
+        - name: keepalived
+          configMap:
+            name: infra-lb-config
+            items:
+              # Keepalived refuses a config file that is executable, the check script must be
+              - {key: keepalived.conf, path: keepalived.conf, mode: 0644}
+              - {key: check-haproxy.sh, path: check-haproxy.sh, mode: 0755}

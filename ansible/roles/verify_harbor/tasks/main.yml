@@ -23,9 +23,15 @@
   failed_when: false
   no_log: true
 
-- name: V11.3 | demo app answers on its LoadBalancer address
+- name: V11.3 | demo app node address
+  ansible.builtin.command: docker inspect -f '{% raw %}{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}{% endraw %}' {{ demo_node }}
+  register: v113_ip
+  changed_when: false
+  failed_when: false
+
+- name: V11.3 | demo app answers on its NodePort
   ansible.builtin.uri:
-    url: "http://{{ demo_ip }}:5000/"
+    url: "http://{{ v113_ip.stdout | default('') | trim }}:{{ demo_nodeport }}/"
     return_content: true
     timeout: 5
     status_code: [-1, 200]
@@ -91,14 +97,14 @@
     pvcs: "{{ v11_raw.results[1].resources | map(attribute='metadata.name') | list }}"
     per_component: >-
       {%- set out = {} -%}
-      {%- for p in pods if p.metadata.labels.get('app') == 'harbor' and p.metadata.labels.get('component') in ['core', 'portal', 'registry', 'jobservice'] -%}
+      {%- for p in pods if p.metadata.labels.get('app') == 'harbor' and p.metadata.labels.get('component') in ['nginx', 'core', 'portal', 'registry', 'jobservice'] -%}
       {%- set c = p.metadata.labels.component -%}
       {%- set _ = out.update({c: out.get(c, []) + [p.spec.nodeName]}) -%}
       {%- endfor -%}
       {{ out }}
     bad_components: >-
       {%- set out = [] -%}
-      {%- for c in ['core', 'portal', 'registry', 'jobservice'] -%}
+      {%- for c in ['nginx', 'core', 'portal', 'registry', 'jobservice'] -%}
       {%- set n = per_component.get(c, []) -%}
       {%- if n | length != 2 or n | unique | length != 2 or (n | map('extract', role_of) | unique | list) != ['app'] -%}{%- set _ = out.append(c) -%}{%- endif -%}
       {%- endfor -%}
@@ -112,11 +118,11 @@
   ansible.builtin.set_fact:
     verify_results: >-
       {{ verify_results + [
-        {'id': 'V11.1', 't': 'core/portal/registry/jobservice: 1+1 on the two app nodes, no bundled database/redis',
+        {'id': 'V11.1', 't': 'nginx/core/portal/registry/jobservice: 1+1 on the two app nodes, no bundled database/redis',
          's': 'PASS' if (bad_components | length == 0 and internal | length == 0) else 'FAIL',
          'd': (('bad: ' ~ bad_components | join(',') ~ '; ') if bad_components else '') ~ (('internal: ' ~ internal | join(',')) if internal else (per_component | length ~ ' components x 2 pods') if not bad_components else '')},
         {'id': 'V11.2', 't': 'UI 200, /v2/ 401, API login 200', 's': 'PASS' if codes == [200, 401, 200] else 'FAIL', 'd': codes | join('/')},
-        {'id': 'V11.3', 't': 'demo app (hello) answers on ' ~ demo_ip, 's': 'PASS' if v113.content | default('') is search('^Hello, Kube!') else 'FAIL',
+        {'id': 'V11.3', 't': 'demo app (hello) answers on ' ~ (v113_ip.stdout | default('?') | trim) ~ ':' ~ demo_nodeport, 's': 'PASS' if v113.content | default('') is search('^Hello, Kube!') else 'FAIL',
          'd': v113.content | default('no answer') | trim},
         {'id': 'V11.4', 't': 'blobs in S3 (objects > 0), only the trivy PVC in the namespace',
          's': 'PASS' if (objects | int > 0 and pvcs == ['data-harbor-trivy-0']) else 'FAIL', 'd': '%s objects; PVCs %s' | format(objects, pvcs | join(','))},
